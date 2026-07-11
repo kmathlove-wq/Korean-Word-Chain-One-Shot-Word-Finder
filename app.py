@@ -327,6 +327,16 @@ def continuation_count(dictionaries: list[str], syllable: str, filters: Filters,
 
 
 def analyse_words(dictionaries: list[str], candidates: list[dict], filters: Filters, dueum: bool, exact_counts: bool = True) -> tuple[list[dict], list[str]]:
+    if not exact_counts:
+        analysed = []
+        for word in candidates:
+            last = last_hangul_syllable(word["word"])
+            is_one_shot = last in RARE_FINALS
+            word.update(last_syllable=last, next_word_count=0 if is_one_shot else 1, is_one_shot=is_one_shot,
+                        dictionary="두 사전 공통" if len(word["dictionary_codes"]) == 2 else DICTIONARIES[word["dictionary_codes"][0]]["name"],
+                        fast_judgement=True)
+            analysed.append(word)
+        return analysed, []
     syllables = {last_hangul_syllable(word["word"]) for word in candidates}
     counts: dict[str, tuple[int, list[str]]] = {}
     warnings = []

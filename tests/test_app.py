@@ -59,7 +59,7 @@ class HelperTests(unittest.TestCase):
              patch.object(app, "continuation_count", return_value=(1, [])) as count:
             response = app.app.test_client().get("/api/search?query=기&dictionary=both&mode=all")
         self.assertEqual(response.status_code, 200)
-        self.assertFalse(count.call_args.args[4])
+        count.assert_not_called()
 
     def test_one_shot_sort_uses_broader_candidate_pool(self):
         safe = app.normalize_item({"word": "가나", "sense": {"pos": "명사"}}, "stdict")
@@ -117,6 +117,16 @@ class HelperTests(unittest.TestCase):
             _analysed, visible, _has_more, warnings = app.one_shot_page(["stdict"], common + [lithium], app.Filters(), True, 1)
         self.assertEqual(warnings, [])
         self.assertEqual(visible[0]["word"], "리튬")
+
+    def test_fast_analysis_marks_rare_final_without_api_calls(self):
+        lithium = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
+        common = app.normalize_item({"word": "리본", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "continuation_count") as count:
+            analysed, warnings = app.analyse_words(["stdict"], [lithium, common], app.Filters(), True, exact_counts=False)
+        self.assertEqual(warnings, [])
+        self.assertTrue(analysed[0]["is_one_shot"])
+        self.assertFalse(analysed[1]["is_one_shot"])
+        count.assert_not_called()
 
 
 if __name__ == "__main__":

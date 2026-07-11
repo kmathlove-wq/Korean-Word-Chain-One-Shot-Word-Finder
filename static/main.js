@@ -28,11 +28,12 @@ function buildParams(page = 1) {
 function card(word) {
   const details = word.detail_url ? `<a href="${escapeHtml(word.detail_url)}" target="_blank" rel="noopener">사전에서 검색하기 ↗</a>` : '<span>검색 링크 없음</span>';
   const isNew = state.recentKeys.has(wordKey(word));
+  const nextCount = word.fast_judgement && word.next_word_count > 0 ? '있음' : `${word.next_word_count}개`;
   return `<article class="word-card ${word.is_one_shot ? 'one-shot' : ''}"${isNew ? ' data-new-result="true"' : ''}>
     <div class="card-top"><h3>${escapeHtml(word.word)}</h3>${word.is_one_shot ? '<span class="badge">한방단어</span>' : ''}</div>
     <p class="pos">${escapeHtml(word.part_of_speech)} · ${escapeHtml(word.dictionary)}</p>
     <p class="definition">${escapeHtml(word.definition)}</p>
-    <div class="stats"><span>마지막 글자 <strong>${escapeHtml(word.last_syllable)}</strong></span><span>이어갈 단어 <strong>${word.next_word_count}개</strong></span></div>
+    <div class="stats"><span>마지막 글자 <strong>${escapeHtml(word.last_syllable)}</strong></span><span>이어갈 단어 <strong>${escapeHtml(nextCount)}</strong></span></div>
     <div class="card-actions">${details}<button class="copy" type="button" data-copy="${escapeHtml(word.word)}">복사</button></div>
   </article>`;
 }
