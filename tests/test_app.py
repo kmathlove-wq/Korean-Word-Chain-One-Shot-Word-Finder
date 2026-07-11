@@ -64,6 +64,17 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([word["word"] for word in response.json["words"]], ["가슘", "가나"])
 
+    def test_one_shot_mode_uses_light_page_search(self):
+        shot = app.normalize_item({"word": "가슘", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "paged_search", return_value=([shot], 100, [])) as paged, \
+             patch.object(app, "merged_search") as merged, \
+             patch.object(app, "continuation_count", return_value=(0, [])):
+            response = app.app.test_client().get("/api/search?query=가&dictionary=stdict&mode=one-shot&sort=alphabet")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["words"][0]["word"], "가슘")
+        paged.assert_called_once()
+        merged.assert_not_called()
+
     def test_continuation_is_not_one_shot_when_filtered_match_exists(self):
         match = app.normalize_item({"word": "가가", "sense": {"pos": "명사"}}, "stdict")
         with patch.object(app, "fetch_dictionary", return_value=([match], 4043)) as fetch:
