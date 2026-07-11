@@ -66,7 +66,7 @@ function scrollToNewResults() {
 }
 
 async function requestSearch(params) {
-  const response = await fetch(`/api/search?${params}`);
+  const response = await fetch(`/api/search?${params}`, {cache: 'no-store'});
   const text = await response.text();
   let data = null;
   try {

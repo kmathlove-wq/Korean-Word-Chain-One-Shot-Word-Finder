@@ -486,6 +486,15 @@ def index():
     return render_template("index.html")
 
 
+@app.after_request
+def prevent_api_cache(response):
+    if request.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 @app.get("/api/health")
 def health():
     return jsonify(status="ok", dictionaries={key: bool(os.getenv(value["key_env"])) for key, value in DICTIONARIES.items()})

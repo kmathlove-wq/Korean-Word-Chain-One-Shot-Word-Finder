@@ -52,6 +52,7 @@ class HelperTests(unittest.TestCase):
             response = app.app.test_client().get("/api/search?query=기&dictionary=stdict&mode=all")
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json["words"][0]["is_one_shot"])
+        self.assertIn("no-store", response.headers["Cache-Control"])
 
     def test_search_rejects_combined_dictionary(self):
         response = app.app.test_client().get("/api/search?query=기&dictionary=both&mode=all")
