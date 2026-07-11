@@ -53,11 +53,16 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json["words"][0]["is_one_shot"])
 
+    def test_search_rejects_combined_dictionary(self):
+        response = app.app.test_client().get("/api/search?query=기&dictionary=both&mode=all")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("표준국어대사전 또는 우리말샘", response.json["error"])
+
     def test_search_uses_fast_continuation_checks(self):
         candidate = app.normalize_item(SAMPLE["channel"]["item"][0], "stdict")
         with patch.object(app, "paged_search", return_value=([candidate], 1, [])), \
              patch.object(app, "continuation_count", return_value=(1, [])) as count:
-            response = app.app.test_client().get("/api/search?query=기&dictionary=both&mode=all")
+            response = app.app.test_client().get("/api/search?query=기&dictionary=stdict&mode=all")
         self.assertEqual(response.status_code, 200)
         count.assert_not_called()
 

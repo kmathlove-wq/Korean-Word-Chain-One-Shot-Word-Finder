@@ -58,7 +58,7 @@ OPENDICT_API_KEY=우리말샘_키
 | `GET /api/health` | 서버 상태와 사전별 키 설정 여부 반환 |
 | `GET /api/search` | 시작 단어 검색, 필터, 한방 판정, 페이지 응답 |
 
-`/api/search`의 주요 매개변수는 `query`, `dictionary`, `mode`, `page`, `noun_only`, `include_proper`, `include_north`, `include_dialect`, `include_old`, `include_technical`, `include_single`, `dueum`이다. `dictionary` 값은 `stdict`, `opendict`, `both` 중 하나다. `mode` 값은 `all`, `words`, `one-shot` 중 하나다.
+`/api/search`의 주요 매개변수는 `query`, `dictionary`, `mode`, `page`, `noun_only`, `include_proper`, `include_north`, `include_dialect`, `include_old`, `include_technical`, `include_single`, `dueum`이다. `dictionary` 값은 `stdict`, `opendict` 중 하나다. `mode` 값은 `all`, `words`, `one-shot` 중 하나다.
 
 ## 백엔드 핵심 규칙
 
@@ -70,7 +70,7 @@ OPENDICT_API_KEY=우리말샘_키
 - 화면 페이지 크기는 24개, 공식 API 묶음 크기는 100개다.
 - 필터로 앞쪽 결과가 모두 제거될 수 있으므로 `paged_search()`는 필요한 결과가 모일 때까지 최대 500개 범위에서 다음 묶음을 확인한다.
 - 메모리 `TTLCache`의 기본 만료 시간은 30분이다. 서버 재시작 시 사라지며 프로세스 간 공유되지 않는다.
-- 두 사전을 함께 검색할 때 같은 표제어는 병합하고 출처를 `두 사전 공통`으로 표시한다.
+- 화면에서는 표준국어대사전 또는 우리말샘 중 하나만 선택해 검색한다.
 
 ## 한방단어 판정
 
@@ -79,7 +79,7 @@ OPENDICT_API_KEY=우리말샘_키
 - 첫 항목이 한 글자 제외 등의 필터에 걸리는 오판을 방지하기 위해 후속 검색은 최대 100개 묶음을 확인한다.
 - 필터를 통과한 후속 단어가 하나라도 있으면 한방단어가 아니다.
 - `dueum=true`이면 원래 음절과 `DUEUM_MAP` 변환 음절을 모두 검사한다. 어느 한쪽에라도 단어가 있으면 한방단어가 아니다.
-- 현재 이어갈 단어 수는 필터 통과 항목이 확인된 API 시작 일치 총계를 사용한다. 두음 변형 또는 두 사전 합계에는 중복이 포함될 수 있다.
+- 현재 이어갈 단어 수는 필터 통과 항목이 확인된 API 시작 일치 총계를 사용한다. 두음 변형 결과 수에는 중복이 포함될 수 있다.
 
 ## 두음법칙
 
@@ -132,5 +132,5 @@ node --check static/main.js
 
 - 국립국어원 API 응답 속도와 일일 호출 제한에 영향을 받는다.
 - API 분류 필드가 일정하지 않아 일부 필터가 사전 웹사이트의 상세 검색과 완전히 같지 않을 수 있다.
-- 두 사전 및 두음 변형 결과 수는 중복 제거된 정확한 합계가 아닐 수 있으나 한방 여부는 하나라도 존재하는지를 기준으로 한다.
+- 두음 변형 결과 수는 중복 제거된 정확한 합계가 아닐 수 있으나 한방 여부는 하나라도 존재하는지를 기준으로 한다.
 - 한방 판정은 선택한 사전과 필터 기준이며 실제 게임 규칙을 보장하지 않는다.

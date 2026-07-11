@@ -270,10 +270,8 @@ def fetch_dictionary(dictionary: str, query: str, start: int, count: int, filter
 
 
 def selected_dictionaries(value: str) -> list[str]:
-    if value == "both":
-        return ["stdict", "opendict"]
     if value not in DICTIONARIES:
-        raise ValueError("올바른 사전을 선택해 주세요.")
+        raise ValueError("표준국어대사전 또는 우리말샘 중 하나를 선택해 주세요.")
     return [value]
 
 
