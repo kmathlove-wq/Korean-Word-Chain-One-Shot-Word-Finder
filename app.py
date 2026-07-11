@@ -357,15 +357,31 @@ def continuation_count(dictionaries: list[str], syllable: str, filters: Filters,
 
 def analyse_words(dictionaries: list[str], candidates: list[dict], filters: Filters, dueum: bool, exact_counts: bool = True) -> tuple[list[dict], list[str]]:
     if not exact_counts:
+        uncertain_syllables = {
+            last_hangul_syllable(word["word"])
+            for word in candidates
+            if last_hangul_syllable(word["word"]) in RARE_FINALS
+            and dueum
+            and dueum_variant(last_hangul_syllable(word["word"])) != last_hangul_syllable(word["word"])
+        }
+        counts: dict[str, tuple[int, list[str]]] = {}
+        warnings = []
+        if uncertain_syllables:
+            with ThreadPoolExecutor(max_workers=min(4, len(uncertain_syllables))) as executor:
+                futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum, False): syllable for syllable in uncertain_syllables}
+                for future in as_completed(futures):
+                    counts[futures[future]] = future.result()
         analysed = []
         for word in candidates:
             last = last_hangul_syllable(word["word"])
-            is_one_shot = last in RARE_FINALS
-            word.update(last_syllable=last, next_word_count=0 if is_one_shot else 1, is_one_shot=is_one_shot,
+            count, notes = counts.get(last, (0 if last in RARE_FINALS else 1, []))
+            warnings.extend(notes)
+            is_one_shot = last in RARE_FINALS and count == 0
+            word.update(last_syllable=last, next_word_count=count, is_one_shot=is_one_shot,
                         dictionary="두 사전 공통" if len(word["dictionary_codes"]) == 2 else DICTIONARIES[word["dictionary_codes"][0]]["name"],
                         fast_judgement=True)
             analysed.append(word)
-        return analysed, []
+        return analysed, list(dict.fromkeys(warnings))
     syllables = {last_hangul_syllable(word["word"]) for word in candidates}
     counts: dict[str, tuple[int, list[str]]] = {}
     warnings = []
@@ -484,6 +500,7 @@ def search():
             for word in rare_candidates:
                 if not any(existing["word"] == word["word"] for existing in candidates):
                     candidates.append(word)
+            raw_total = max(raw_total, len(candidates))
             if mode == "one-shot":
                 analysed, visible, has_more, notes = one_shot_page(dictionaries, candidates, filters, dueum, page)
                 warnings.extend(notes)

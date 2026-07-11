@@ -97,6 +97,15 @@ class HelperTests(unittest.TestCase):
         self.assertEqual([word["word"] for word in response.json["words"]], ["리튬"])
         rare.assert_called_once()
 
+    def test_one_shot_total_includes_direct_rare_candidates(self):
+        shot = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "merged_search", return_value=([], 0, [])), \
+             patch.object(app, "rare_final_candidates", return_value=([shot], [])):
+            response = app.app.test_client().get("/api/search?query=리&dictionary=stdict&mode=one-shot&sort=alphabet")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["total"], 1)
+        self.assertEqual(response.json["one_shot_count"], 1)
+
     def test_rare_final_candidates_filters_to_matching_rare_endings(self):
         shot = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "opendict")
         safe = app.normalize_item({"word": "리튬이온", "sense": {"pos": "명사"}}, "opendict")
@@ -104,6 +113,24 @@ class HelperTests(unittest.TestCase):
             words, warnings = app.rare_final_candidates(["opendict"], "리", app.Filters())
         self.assertEqual(warnings, [])
         self.assertEqual([word["word"] for word in words], ["리튬"])
+
+    def test_fast_analysis_checks_dueum_variant_for_rare_final(self):
+        candidate = app.normalize_item({"word": "리놀륨", "sense": {"pos": "명사"}}, "opendict")
+        follow = app.normalize_item({"word": "윰라대왕", "sense": {"pos": "명사"}}, "opendict")
+        with patch.object(app, "fetch_dictionary", side_effect=[([], 0), ([follow], 2)]) as fetch:
+            analysed, warnings = app.analyse_words(["opendict"], [candidate], app.Filters(), True, exact_counts=False)
+        self.assertEqual(warnings, [])
+        self.assertFalse(analysed[0]["is_one_shot"])
+        self.assertEqual(analysed[0]["next_word_count"], 2)
+        self.assertEqual([call.args[1] for call in fetch.call_args_list], ["륨", "윰"])
+
+    def test_fast_analysis_does_not_apply_dueum_when_disabled(self):
+        candidate = app.normalize_item({"word": "리놀륨", "sense": {"pos": "명사"}}, "opendict")
+        with patch.object(app, "fetch_dictionary") as fetch:
+            analysed, warnings = app.analyse_words(["opendict"], [candidate], app.Filters(), False, exact_counts=False)
+        self.assertEqual(warnings, [])
+        self.assertTrue(analysed[0]["is_one_shot"])
+        fetch.assert_not_called()
 
     def test_merged_search_continues_after_filtered_empty_batch(self):
         later = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
