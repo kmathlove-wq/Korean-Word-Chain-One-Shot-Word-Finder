@@ -189,7 +189,7 @@ class HelperTests(unittest.TestCase):
     def test_rare_final_candidates_scans_deeper_end_pages(self):
         sodium = app.normalize_item({"word": "수산화나트륨", "sense": {"pos": "명사"}}, "opendict")
         def fake_fetch(_d, query, start, _c, _f, method="start"):
-            return ([sodium], 450) if query == "륨" and method == "end" and start == 101 else ([], 450)
+            return ([sodium], 450) if query == "륨" and method == "end" and start == 2 else ([], 450)
         with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
             words, warnings = app.rare_final_candidates(["opendict"], "수", app.Filters())
         self.assertEqual(warnings, [])
@@ -230,7 +230,7 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(total, 2911)
         self.assertEqual(warnings, [])
         self.assertEqual([word["word"] for word in words], ["리튬"])
-        self.assertEqual([call.args[2] for call in fetch.call_args_list], [1, 101])
+        self.assertEqual([call.args[2] for call in fetch.call_args_list], [1, 2])
 
     def test_merged_search_stops_on_api_start_limit(self):
         with patch.object(app, "fetch_dictionary", side_effect=[([], 2911), app.ApiError("Invalid start value")]) as fetch:

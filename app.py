@@ -28,14 +28,14 @@ PAGE_SIZE = 24
 API_PAGE_SIZE = 100
 MAX_CANDIDATES = 300
 SORT_CANDIDATES = MAX_CANDIDATES
-MAX_API_SCAN = 1000
-ONE_SHOT_SCAN_WINDOW = 500
+MAX_API_SCAN = 10
+ONE_SHOT_SCAN_WINDOW = 5
 PREFIX_EXPANSION_LIMIT = 6
-PREFIX_EXPANSION_PAGE_SIZE = 20
-PREFIX_EXPANSION_SCAN_LIMIT = 20
+PREFIX_EXPANSION_PAGE_SIZE = API_PAGE_SIZE
+PREFIX_EXPANSION_SCAN_LIMIT = 1
 RARE_PROBE_PAGE_SIZE = 100
-RARE_PROBE_DEEP_START = 1000
-RARE_PROBE_SHALLOW_START = 200
+RARE_PROBE_DEEP_START = 10
+RARE_PROBE_SHALLOW_START = 2
 RARE_CANDIDATE_LIMIT = 120
 ONE_SHOT_CHUNK_SIZE = 8
 ONE_SHOT_ANALYSIS_LIMIT = 80
@@ -307,9 +307,9 @@ def merged_search(dictionaries: list[str], query: str, filters: Filters, limit: 
                     raise
                 total = reported_total
                 words.extend(batch)
-                if api_start + API_PAGE_SIZE > reported_total:
+                if api_start * API_PAGE_SIZE >= reported_total:
                     break
-                api_start += API_PAGE_SIZE
+                api_start += 1
             totals += total
             for word in words:
                 current = merged.get(word["word"])
@@ -365,7 +365,7 @@ def rare_final_candidates(dictionaries: list[str], query: str, filters: Filters)
         shallow_jobs.extend((dictionary, final, "end", 1) for final in RARE_FINAL_PRIORITY)
         for final in RARE_FINAL_PRIORITY:
             max_start = RARE_PROBE_DEEP_START if final in DEEP_RARE_FINALS else RARE_PROBE_SHALLOW_START
-            deep_jobs.extend((dictionary, final, "end", start) for start in range(1 + RARE_PROBE_PAGE_SIZE, max_start + 1, RARE_PROBE_PAGE_SIZE))
+            deep_jobs.extend((dictionary, final, "end", start) for start in range(2, max_start + 1))
         if last_hangul_syllable(query) in RARE_FINALS:
             shallow_jobs.append((dictionary, query, "start", 1))
         shallow_jobs.extend((dictionary, word, "start", 1) for word in sorted(KNOWN_RARE_WORD_PROBES) if word.startswith(query))
@@ -383,7 +383,7 @@ def one_shot_scan_candidates(dictionaries: list[str], query: str, filters: Filte
     scan_until = page * ONE_SHOT_SCAN_WINDOW
     for dictionary in dictionaries:
         dictionary_total = 0
-        for api_start in range(start_from, scan_until + 1, API_PAGE_SIZE):
+        for api_start in range(start_from, scan_until + 1):
             try:
                 batch, dictionary_total = fetch_dictionary(dictionary, query, api_start, API_PAGE_SIZE, filters)
             except ApiError as exc:
@@ -397,12 +397,12 @@ def one_shot_scan_candidates(dictionaries: list[str], query: str, filters: Filte
                     current["dictionary_codes"].extend(code for code in word["dictionary_codes"] if code not in current["dictionary_codes"])
                 else:
                     merged[word["word"]] = word
-            if api_start + API_PAGE_SIZE > dictionary_total:
+            if api_start * API_PAGE_SIZE >= dictionary_total:
                 break
         total += dictionary_total
     if not merged and warnings:
         raise ApiError(" ".join(warnings))
-    return list(merged.values()), total, scan_until < total, list(dict.fromkeys(warnings))
+    return list(merged.values()), total, scan_until * API_PAGE_SIZE < total, list(dict.fromkeys(warnings))
 
 
 def prefix_expansion_candidates(dictionaries: list[str], query: str, seeds: list[dict], filters: Filters) -> tuple[list[dict], list[str]]:
@@ -425,7 +425,7 @@ def prefix_expansion_candidates(dictionaries: list[str], query: str, seeds: list
     warnings: list[str] = []
     for prefix in prefixes:
         for dictionary in dictionaries:
-            for api_start in range(1, PREFIX_EXPANSION_SCAN_LIMIT + 1, PREFIX_EXPANSION_PAGE_SIZE):
+            for api_start in range(1, PREFIX_EXPANSION_SCAN_LIMIT + 1):
                 try:
                     batch, total = fetch_dictionary(dictionary, prefix, api_start, PREFIX_EXPANSION_PAGE_SIZE, filters)
                 except ApiError as exc:
@@ -441,7 +441,7 @@ def prefix_expansion_candidates(dictionaries: list[str], query: str, seeds: list
                         current["dictionary_codes"].extend(code for code in word["dictionary_codes"] if code not in current["dictionary_codes"])
                     else:
                         merged[word["word"]] = word
-                if api_start + PREFIX_EXPANSION_PAGE_SIZE > total:
+                if api_start * PREFIX_EXPANSION_PAGE_SIZE >= total:
                     break
     return list(merged.values()), list(dict.fromkeys(warnings))
 
@@ -471,7 +471,7 @@ def starting_total(dictionaries: list[str], query: str, filters: Filters) -> tup
     total, warnings = 0, []
     for dictionary in dictionaries:
         try:
-            _words, dictionary_total = fetch_dictionary(dictionary, query, 1, 1, filters)
+            _words, dictionary_total = fetch_dictionary(dictionary, query, 1, API_PAGE_SIZE, filters)
             total += dictionary_total
         except ApiError as exc:
             warnings.append(str(exc))
@@ -567,16 +567,21 @@ def paged_search(dictionaries: list[str], query: str, filters: Filters, page: in
     needed = page * PAGE_SIZE
     for dictionary in dictionaries:
         try:
-            words: list[dict] = []
+            words: dict[str, dict] = {}
             api_start, dictionary_total = 1, 0
             # 한 글자·전문어 등이 앞쪽을 채워 모두 걸러지는 경우 다음 묶음도 확인한다.
-            while len(words) < needed and (not dictionary_total or api_start <= dictionary_total) and api_start <= 500:
+            while len(words) < needed and (not dictionary_total or (api_start - 1) * API_PAGE_SIZE < dictionary_total) and api_start <= MAX_API_SCAN:
                 batch, dictionary_total = fetch_dictionary(dictionary, query, api_start, API_PAGE_SIZE, filters)
-                words.extend(batch)
-                api_start += API_PAGE_SIZE
-            words = words[(page - 1) * PAGE_SIZE:needed]
+                for word in batch:
+                    current = words.get(word["word"])
+                    if current:
+                        current["dictionary_codes"].extend(code for code in word["dictionary_codes"] if code not in current["dictionary_codes"])
+                    else:
+                        words[word["word"]] = word
+                api_start += 1
+            selected = list(words.values())[(page - 1) * PAGE_SIZE:needed]
             total += dictionary_total
-            for word in words:
+            for word in selected:
                 current = merged.get(word["word"])
                 if current:
                     current["dictionary_codes"].extend(code for code in word["dictionary_codes"] if code not in current["dictionary_codes"])
@@ -641,7 +646,7 @@ def search():
                     raw_total, total_warnings = starting_total(dictionaries, query, filters)
                     warnings.extend(total_warnings)
                     raw_total = max(raw_total, len(candidates))
-                    has_more = raw_total > ONE_SHOT_SCAN_WINDOW
+                    has_more = raw_total > ONE_SHOT_SCAN_WINDOW * API_PAGE_SIZE
                 else:
                     candidates, raw_total, has_more, scan_warnings = one_shot_scan_candidates(dictionaries, query, filters, page)
                     warnings.extend(scan_warnings)
