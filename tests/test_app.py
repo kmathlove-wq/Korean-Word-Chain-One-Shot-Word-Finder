@@ -108,11 +108,18 @@ class HelperTests(unittest.TestCase):
 
     def test_rare_final_candidates_filters_to_matching_rare_endings(self):
         shot = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "opendict")
+        linoleum = app.normalize_item({"word": "리놀륨", "sense": {"pos": "명사"}}, "opendict")
         safe = app.normalize_item({"word": "리튬이온", "sense": {"pos": "명사"}}, "opendict")
-        with patch.object(app, "fetch_dictionary", side_effect=lambda _d, q, _s, _c, _f: ([shot, safe], 2) if q == "리튬" else ([], 0)):
+        def fake_fetch(_d, query, _s, _c, _f):
+            if query == "리튬":
+                return [shot, safe], 2
+            if query == "리놀륨":
+                return [linoleum], 1
+            return [], 0
+        with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
             words, warnings = app.rare_final_candidates(["opendict"], "리", app.Filters())
         self.assertEqual(warnings, [])
-        self.assertEqual([word["word"] for word in words], ["리튬"])
+        self.assertEqual([word["word"] for word in words], ["리튬", "리놀륨"])
 
     def test_fast_analysis_checks_dueum_variant_for_rare_final(self):
         candidate = app.normalize_item({"word": "리놀륨", "sense": {"pos": "명사"}}, "opendict")

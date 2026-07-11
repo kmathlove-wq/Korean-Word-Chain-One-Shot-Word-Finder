@@ -40,6 +40,9 @@ RARE_FINALS = {
     "튬", "듐", "륨", "슘", "븀", "늄", "뮴", "윰", "쥼", "줌",
     "릇", "릎", "릉", "쁨", "쯤", "낌", "깡", "꽝", "쩡",
 }
+KNOWN_RARE_WORD_PROBES = {
+    "리놀륨",
+}
 
 HANGUL_BASE = 0xAC00
 HANGUL_END = 0xD7A3
@@ -317,6 +320,7 @@ def rare_final_candidates(dictionaries: list[str], query: str, filters: Filters)
     warnings = []
     probes = [query] if last_hangul_syllable(query) in RARE_FINALS else []
     probes.extend(f"{query}{final}" for final in sorted(RARE_FINALS))
+    probes.extend(word for word in sorted(KNOWN_RARE_WORD_PROBES) if word.startswith(query))
     for dictionary in dictionaries:
         for probe in dict.fromkeys(probes):
             try:
