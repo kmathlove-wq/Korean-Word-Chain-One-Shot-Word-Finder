@@ -88,6 +88,23 @@ class HelperTests(unittest.TestCase):
         paged.assert_not_called()
         merged.assert_called_once()
 
+    def test_one_shot_mode_uses_direct_rare_final_candidates(self):
+        shot = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "opendict")
+        with patch.object(app, "merged_search", return_value=([], 2911, [])), \
+             patch.object(app, "rare_final_candidates", return_value=([shot], [])) as rare:
+            response = app.app.test_client().get("/api/search?query=리&dictionary=opendict&mode=one-shot&sort=alphabet")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([word["word"] for word in response.json["words"]], ["리튬"])
+        rare.assert_called_once()
+
+    def test_rare_final_candidates_filters_to_matching_rare_endings(self):
+        shot = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "opendict")
+        safe = app.normalize_item({"word": "리튬이온", "sense": {"pos": "명사"}}, "opendict")
+        with patch.object(app, "fetch_dictionary", side_effect=lambda _d, q, _s, _c, _f: ([shot, safe], 2) if q == "리튬" else ([], 0)):
+            words, warnings = app.rare_final_candidates(["opendict"], "리", app.Filters())
+        self.assertEqual(warnings, [])
+        self.assertEqual([word["word"] for word in words], ["리튬"])
+
     def test_merged_search_continues_after_filtered_empty_batch(self):
         later = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
         with patch.object(app, "fetch_dictionary", side_effect=[([], 2911), ([later], 2911)]) as fetch:

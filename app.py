@@ -311,6 +311,30 @@ def merged_search(dictionaries: list[str], query: str, filters: Filters, limit: 
     return list(merged.values())[:limit], totals, warnings
 
 
+def rare_final_candidates(dictionaries: list[str], query: str, filters: Filters) -> tuple[list[dict], list[str]]:
+    """한방단어로 자주 쓰이는 끝글자 후보를 직접 찔러 검색한다."""
+    merged: dict[str, dict] = {}
+    warnings = []
+    probes = [query] if last_hangul_syllable(query) in RARE_FINALS else []
+    probes.extend(f"{query}{final}" for final in sorted(RARE_FINALS))
+    for dictionary in dictionaries:
+        for probe in dict.fromkeys(probes):
+            try:
+                words, _total = fetch_dictionary(dictionary, probe, 1, 10, filters)
+            except ApiError as exc:
+                warnings.append(str(exc))
+                continue
+            for word in words:
+                if not word["word"].startswith(query) or last_hangul_syllable(word["word"]) not in RARE_FINALS:
+                    continue
+                current = merged.get(word["word"])
+                if current:
+                    current["dictionary_codes"].extend(code for code in word["dictionary_codes"] if code not in current["dictionary_codes"])
+                else:
+                    merged[word["word"]] = word
+    return list(merged.values()), list(dict.fromkeys(warnings))
+
+
 def continuation_count(dictionaries: list[str], syllable: str, filters: Filters, dueum: bool, exact: bool = True) -> tuple[int, list[str]]:
     variants = get_dueum_variants(syllable) if dueum else [syllable]
     total_count = 0
@@ -455,6 +479,11 @@ def search():
         broad_sort = sort == "one-shot" or mode == "one-shot"
         if broad_sort:
             candidates, raw_total, warnings = merged_search(dictionaries, query, filters, SORT_CANDIDATES)
+            rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters)
+            warnings.extend(rare_warnings)
+            for word in rare_candidates:
+                if not any(existing["word"] == word["word"] for existing in candidates):
+                    candidates.append(word)
             if mode == "one-shot":
                 analysed, visible, has_more, notes = one_shot_page(dictionaries, candidates, filters, dueum, page)
                 warnings.extend(notes)
