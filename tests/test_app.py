@@ -31,6 +31,10 @@ class HelperTests(unittest.TestCase):
         words, total = app.parse_json(SAMPLE, "stdict")
         self.assertEqual(total, 1)
         self.assertEqual(words[0]["word"], "기쁨")
+        self.assertEqual(
+            words[0]["detail_url"],
+            "https://stdict.korean.go.kr/search/searchResult.do?searchKeyword=%EA%B8%B0%EC%81%A8&pageSize=10",
+        )
 
     def test_health(self):
         response = app.app.test_client().get("/api/health")

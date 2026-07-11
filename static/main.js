@@ -26,7 +26,7 @@ function buildParams(page = 1) {
 }
 
 function card(word) {
-  const details = word.detail_url ? `<a href="${escapeHtml(word.detail_url)}" target="_blank" rel="noopener">사전에서 자세히 보기 ↗</a>` : '<span>상세 링크 없음</span>';
+  const details = word.detail_url ? `<a href="${escapeHtml(word.detail_url)}" target="_blank" rel="noopener">사전에서 검색하기 ↗</a>` : '<span>검색 링크 없음</span>';
   const isNew = state.recentKeys.has(wordKey(word));
   return `<article class="word-card ${word.is_one_shot ? 'one-shot' : ''}"${isNew ? ' data-new-result="true"' : ''}>
     <div class="card-top"><h3>${escapeHtml(word.word)}</h3>${word.is_one_shot ? '<span class="badge">한방단어</span>' : ''}</div>

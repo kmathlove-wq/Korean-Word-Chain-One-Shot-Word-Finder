@@ -44,13 +44,13 @@ DICTIONARIES = {
         "name": "표준국어대사전",
         "endpoint": "https://stdict.korean.go.kr/api/search.do",
         "key_env": "STDICT_API_KEY",
-        "detail": "https://stdict.korean.go.kr/search/searchView.do?word_no={target_code}",
+        "detail": "https://stdict.korean.go.kr/search/searchResult.do?searchKeyword={word}&pageSize=10",
     },
     "opendict": {
         "name": "우리말샘",
         "endpoint": "https://opendict.korean.go.kr/api/search",
         "key_env": "OPENDICT_API_KEY",
-        "detail": "https://opendict.korean.go.kr/dictionary/view?sense_no={target_code}",
+        "detail": "https://opendict.korean.go.kr/search/searchResult?query={word}",
     },
 }
 
@@ -167,10 +167,9 @@ def normalize_item(item: dict, dictionary: str) -> dict:
     if not isinstance(sense, dict):
         sense = {}
     word = clean_word(scalar(item.get("word")))
-    code = scalar(item.get("target_code") or sense.get("target_code"))
     detail = scalar(item.get("link"))
-    if not detail and code:
-        detail = DICTIONARIES[dictionary]["detail"].format(target_code=quote(code))
+    if not detail and word:
+        detail = DICTIONARIES[dictionary]["detail"].format(word=quote(word))
     return {
         "word": word,
         "part_of_speech": scalar(sense.get("pos") or item.get("pos"), "품사 미상"),
