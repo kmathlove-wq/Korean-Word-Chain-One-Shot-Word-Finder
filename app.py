@@ -29,6 +29,7 @@ API_PAGE_SIZE = 100
 MAX_CANDIDATES = 300
 SORT_CANDIDATES = MAX_CANDIDATES
 MAX_API_SCAN = 1000
+RARE_PROBE_PAGE_SIZE = 100
 ONE_SHOT_CHUNK_SIZE = 8
 ONE_SHOT_ANALYSIS_LIMIT = 80
 FAST_CONTINUATION_PAGE_SIZE = 20
@@ -237,16 +238,16 @@ def allowed(word: dict, filters: Filters) -> bool:
     return True
 
 
-def fetch_dictionary(dictionary: str, query: str, start: int, count: int, filters: Filters) -> tuple[list[dict], int]:
+def fetch_dictionary(dictionary: str, query: str, start: int, count: int, filters: Filters, method: str = "start") -> tuple[list[dict], int]:
     config = DICTIONARIES[dictionary]
     key = os.getenv(config["key_env"], "").strip()
     if not key:
         raise ApiError(f"{config['name']} API 키가 설정되지 않았습니다.")
-    cache_key = (dictionary, query, "start", filters.key(), start, count)
+    cache_key = (dictionary, query, method, filters.key(), start, count)
     cached = cache.get(cache_key)
     if cached is not None:
         return cached
-    params = {"key": key, "q": query, "req_type": "json", "type_search": "search", "method": "start", "start": start, "num": count, "advanced": "y"}
+    params = {"key": key, "q": query, "req_type": "json", "type_search": "search", "method": method, "start": start, "num": count, "advanced": "y"}
     last_error: requests.RequestException | None = None
     for attempt in range(REQUEST_ATTEMPTS):
         try:
@@ -315,19 +316,29 @@ def merged_search(dictionaries: list[str], query: str, filters: Filters, limit: 
 
 
 def rare_final_candidates(dictionaries: list[str], query: str, filters: Filters) -> tuple[list[dict], list[str]]:
-    """한방단어로 자주 쓰이는 끝글자 후보를 직접 찔러 검색한다."""
+    """희귀 끝글자를 포함하는 단어를 역으로 찾아 한방 후보를 보강한다."""
     merged: dict[str, dict] = {}
     warnings = []
-    probes = [query] if last_hangul_syllable(query) in RARE_FINALS else []
-    probes.extend(f"{query}{final}" for final in sorted(RARE_FINALS))
-    probes.extend(word for word in sorted(KNOWN_RARE_WORD_PROBES) if word.startswith(query))
+    jobs: list[tuple[str, str, str]] = []
     for dictionary in dictionaries:
-        for probe in dict.fromkeys(probes):
-            try:
-                words, _total = fetch_dictionary(dictionary, probe, 1, 10, filters)
-            except ApiError as exc:
-                warnings.append(str(exc))
-                continue
+        jobs.extend((dictionary, final, "include") for final in sorted(RARE_FINALS))
+        if last_hangul_syllable(query) in RARE_FINALS:
+            jobs.append((dictionary, query, "start"))
+        jobs.extend((dictionary, word, "start") for word in sorted(KNOWN_RARE_WORD_PROBES) if word.startswith(query))
+
+    def probe(job: tuple[str, str, str]) -> tuple[list[dict], list[str]]:
+        dictionary, term, method = job
+        try:
+            words, _total = fetch_dictionary(dictionary, term, 1, RARE_PROBE_PAGE_SIZE, filters, method)
+            return words, []
+        except ApiError as exc:
+            return [], [str(exc)]
+
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(jobs)))) as executor:
+        futures = [executor.submit(probe, job) for job in dict.fromkeys(jobs)]
+        for future in as_completed(futures):
+            words, notes = future.result()
+            warnings.extend(notes)
             for word in words:
                 if not word["word"].startswith(query) or last_hangul_syllable(word["word"]) not in RARE_FINALS:
                     continue
@@ -365,8 +376,6 @@ def analyse_words(dictionaries: list[str], candidates: list[dict], filters: Filt
             last_hangul_syllable(word["word"])
             for word in candidates
             if last_hangul_syllable(word["word"]) in RARE_FINALS
-            and dueum
-            and dueum_variant(last_hangul_syllable(word["word"])) != last_hangul_syllable(word["word"])
         }
         counts: dict[str, tuple[int, list[str]]] = {}
         warnings = []

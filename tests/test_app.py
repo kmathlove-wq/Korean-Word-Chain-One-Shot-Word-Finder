@@ -64,7 +64,7 @@ class HelperTests(unittest.TestCase):
              patch.object(app, "continuation_count", return_value=(1, [])) as count:
             response = app.app.test_client().get("/api/search?query=기&dictionary=stdict&mode=all")
         self.assertEqual(response.status_code, 200)
-        count.assert_not_called()
+        count.assert_called_once()
 
     def test_one_shot_sort_uses_broader_candidate_pool(self):
         safe = app.normalize_item({"word": "가나", "sense": {"pos": "명사"}}, "stdict")
@@ -91,7 +91,8 @@ class HelperTests(unittest.TestCase):
     def test_one_shot_mode_uses_direct_rare_final_candidates(self):
         shot = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "opendict")
         with patch.object(app, "merged_search", return_value=([], 2911, [])), \
-             patch.object(app, "rare_final_candidates", return_value=([shot], [])) as rare:
+             patch.object(app, "rare_final_candidates", return_value=([shot], [])) as rare, \
+             patch.object(app, "continuation_count", return_value=(0, [])):
             response = app.app.test_client().get("/api/search?query=리&dictionary=opendict&mode=one-shot&sort=alphabet")
         self.assertEqual(response.status_code, 200)
         self.assertEqual([word["word"] for word in response.json["words"]], ["리튬"])
@@ -100,7 +101,8 @@ class HelperTests(unittest.TestCase):
     def test_one_shot_total_includes_direct_rare_candidates(self):
         shot = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
         with patch.object(app, "merged_search", return_value=([], 0, [])), \
-             patch.object(app, "rare_final_candidates", return_value=([shot], [])):
+             patch.object(app, "rare_final_candidates", return_value=([shot], [])), \
+             patch.object(app, "continuation_count", return_value=(0, [])):
             response = app.app.test_client().get("/api/search?query=리&dictionary=stdict&mode=one-shot&sort=alphabet")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["total"], 1)
@@ -110,16 +112,26 @@ class HelperTests(unittest.TestCase):
         shot = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "opendict")
         linoleum = app.normalize_item({"word": "리놀륨", "sense": {"pos": "명사"}}, "opendict")
         safe = app.normalize_item({"word": "리튬이온", "sense": {"pos": "명사"}}, "opendict")
-        def fake_fetch(_d, query, _s, _c, _f):
-            if query == "리튬":
+        def fake_fetch(_d, query, _s, _c, _f, method="start"):
+            if query == "튬" and method == "include":
                 return [shot, safe], 2
-            if query == "리놀륨":
+            if query == "륨" and method == "include":
                 return [linoleum], 1
             return [], 0
         with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
             words, warnings = app.rare_final_candidates(["opendict"], "리", app.Filters())
         self.assertEqual(warnings, [])
-        self.assertEqual([word["word"] for word in words], ["리튬", "리놀륨"])
+        self.assertEqual(sorted(word["word"] for word in words), ["리놀륨", "리튬"])
+
+    def test_rare_final_candidates_finds_middle_syllable_words(self):
+        magnesium = app.normalize_item({"word": "수산마그네슘", "sense": {"pos": "명사"}}, "opendict")
+        other = app.normalize_item({"word": "마그네슘", "sense": {"pos": "명사"}}, "opendict")
+        def fake_fetch(_d, query, _s, _c, _f, method="start"):
+            return ([magnesium, other], 2) if query == "슘" and method == "include" else ([], 0)
+        with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
+            words, warnings = app.rare_final_candidates(["opendict"], "수", app.Filters())
+        self.assertEqual(warnings, [])
+        self.assertEqual([word["word"] for word in words], ["수산마그네슘"])
 
     def test_fast_analysis_checks_dueum_variant_for_rare_final(self):
         candidate = app.normalize_item({"word": "리놀륨", "sense": {"pos": "명사"}}, "opendict")
@@ -133,11 +145,21 @@ class HelperTests(unittest.TestCase):
 
     def test_fast_analysis_does_not_apply_dueum_when_disabled(self):
         candidate = app.normalize_item({"word": "리놀륨", "sense": {"pos": "명사"}}, "opendict")
-        with patch.object(app, "fetch_dictionary") as fetch:
+        with patch.object(app, "fetch_dictionary", return_value=([], 0)) as fetch:
             analysed, warnings = app.analyse_words(["opendict"], [candidate], app.Filters(), False, exact_counts=False)
         self.assertEqual(warnings, [])
         self.assertTrue(analysed[0]["is_one_shot"])
-        fetch.assert_not_called()
+        self.assertEqual([call.args[1] for call in fetch.call_args_list], ["륨"])
+
+    def test_fast_analysis_rejects_rare_final_when_follow_word_exists(self):
+        candidate = app.normalize_item({"word": "수산마그네슘", "sense": {"pos": "명사"}}, "opendict")
+        follow = app.normalize_item({"word": "슘페터", "sense": {"pos": "명사"}}, "opendict")
+        with patch.object(app, "fetch_dictionary", return_value=([follow], 1)) as fetch:
+            analysed, warnings = app.analyse_words(["opendict"], [candidate], app.Filters(), True, exact_counts=False)
+        self.assertEqual(warnings, [])
+        self.assertFalse(analysed[0]["is_one_shot"])
+        self.assertEqual(analysed[0]["next_word_count"], 1)
+        self.assertEqual([call.args[1] for call in fetch.call_args_list], ["슘"])
 
     def test_merged_search_continues_after_filtered_empty_batch(self):
         later = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
@@ -191,15 +213,15 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual(visible[0]["word"], "리튬")
 
-    def test_fast_analysis_marks_rare_final_without_api_calls(self):
+    def test_fast_analysis_verifies_rare_final_before_marking_one_shot(self):
         lithium = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
         common = app.normalize_item({"word": "리본", "sense": {"pos": "명사"}}, "stdict")
-        with patch.object(app, "continuation_count") as count:
+        with patch.object(app, "continuation_count", return_value=(0, [])) as count:
             analysed, warnings = app.analyse_words(["stdict"], [lithium, common], app.Filters(), True, exact_counts=False)
         self.assertEqual(warnings, [])
         self.assertTrue(analysed[0]["is_one_shot"])
         self.assertFalse(analysed[1]["is_one_shot"])
-        count.assert_not_called()
+        count.assert_called_once()
 
 
 if __name__ == "__main__":
