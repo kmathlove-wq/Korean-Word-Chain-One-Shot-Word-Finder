@@ -88,6 +88,15 @@ class HelperTests(unittest.TestCase):
         paged.assert_not_called()
         merged.assert_called_once()
 
+    def test_merged_search_continues_after_filtered_empty_batch(self):
+        later = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "fetch_dictionary", side_effect=[([], 2911), ([later], 2911)]) as fetch:
+            words, total, warnings = app.merged_search(["stdict"], "리", app.Filters(), limit=1)
+        self.assertEqual(total, 2911)
+        self.assertEqual(warnings, [])
+        self.assertEqual([word["word"] for word in words], ["리튬"])
+        self.assertEqual([call.args[2] for call in fetch.call_args_list], [1, 101])
+
     def test_continuation_is_not_one_shot_when_filtered_match_exists(self):
         match = app.normalize_item({"word": "가가", "sense": {"pos": "명사"}}, "stdict")
         with patch.object(app, "fetch_dictionary", return_value=([match], 4043)) as fetch:

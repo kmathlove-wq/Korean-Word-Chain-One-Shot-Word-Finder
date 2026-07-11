@@ -28,6 +28,7 @@ PAGE_SIZE = 24
 API_PAGE_SIZE = 100
 MAX_CANDIDATES = 300
 SORT_CANDIDATES = MAX_CANDIDATES
+MAX_API_SCAN = 2000
 ONE_SHOT_CHUNK_SIZE = 8
 ONE_SHOT_ANALYSIS_LIMIT = 80
 FAST_CONTINUATION_PAGE_SIZE = 20
@@ -282,12 +283,13 @@ def merged_search(dictionaries: list[str], query: str, filters: Filters, limit: 
         try:
             words, total = [], 0
             api_start = 1
-            # 공식 API의 num 상한에 맞춰 필요한 범위만 페이지 단위로 가져온다.
-            while len(words) < limit:
-                batch, reported_total = fetch_dictionary(dictionary, query, api_start, min(API_PAGE_SIZE, limit - len(words)), filters)
+            # 필터로 특정 API 묶음이 모두 제외되어도 뒤쪽에 허용 단어가 있을 수 있으므로
+            # reported_total 범위 안에서는 제한된 깊이까지 계속 훑는다.
+            while len(words) < limit and api_start <= MAX_API_SCAN:
+                batch, reported_total = fetch_dictionary(dictionary, query, api_start, API_PAGE_SIZE, filters)
                 total = reported_total
                 words.extend(batch)
-                if api_start + API_PAGE_SIZE > reported_total or not batch:
+                if api_start + API_PAGE_SIZE > reported_total:
                     break
                 api_start += API_PAGE_SIZE
             totals += total
