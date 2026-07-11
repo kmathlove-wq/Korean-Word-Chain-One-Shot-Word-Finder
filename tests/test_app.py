@@ -134,6 +134,15 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual([word["word"] for word in words], ["수산마그네슘"])
 
+    def test_rare_final_candidates_scans_deeper_include_pages(self):
+        sodium = app.normalize_item({"word": "수산화나트륨", "sense": {"pos": "명사"}}, "opendict")
+        def fake_fetch(_d, query, start, _c, _f, method="start"):
+            return ([sodium], 450) if query == "륨" and method == "include" and start == 101 else ([], 450)
+        with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
+            words, warnings = app.rare_final_candidates(["opendict"], "수", app.Filters())
+        self.assertEqual(warnings, [])
+        self.assertEqual([word["word"] for word in words], ["수산화나트륨"])
+
     def test_fast_analysis_checks_dueum_variant_for_rare_final(self):
         candidate = app.normalize_item({"word": "리놀륨", "sense": {"pos": "명사"}}, "opendict")
         follow = app.normalize_item({"word": "윰라대왕", "sense": {"pos": "명사"}}, "opendict")

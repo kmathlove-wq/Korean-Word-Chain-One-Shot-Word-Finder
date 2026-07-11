@@ -30,6 +30,9 @@ MAX_CANDIDATES = 300
 SORT_CANDIDATES = MAX_CANDIDATES
 MAX_API_SCAN = 1000
 RARE_PROBE_PAGE_SIZE = 100
+RARE_PROBE_DEEP_START = 1000
+RARE_PROBE_SHALLOW_START = 200
+RARE_CANDIDATE_LIMIT = 120
 ONE_SHOT_CHUNK_SIZE = 8
 ONE_SHOT_ANALYSIS_LIMIT = 80
 FAST_CONTINUATION_PAGE_SIZE = 20
@@ -41,6 +44,8 @@ RARE_FINALS = {
     "튬", "듐", "륨", "슘", "븀", "늄", "뮴", "윰", "쥼", "줌",
     "릇", "릎", "릉", "쁨", "쯤", "낌", "깡", "꽝", "쩡",
 }
+RARE_FINAL_PRIORITY = ["륨", "슘", "튬", "듐", "늄", "븀", "뮴", "윰", "쥼", "줌", "릇", "릎", "릉", "쁨", "쯤", "낌", "깡", "꽝", "쩡"]
+DEEP_RARE_FINALS = {"륨", "슘", "튬", "듐", "늄"}
 KNOWN_RARE_WORD_PROBES = {
     "리놀륨",
 }
@@ -319,19 +324,23 @@ def rare_final_candidates(dictionaries: list[str], query: str, filters: Filters)
     """희귀 끝글자를 포함하는 단어를 역으로 찾아 한방 후보를 보강한다."""
     merged: dict[str, dict] = {}
     warnings = []
-    jobs: list[tuple[str, str, str]] = []
+    jobs: list[tuple[str, str, str, int]] = []
     for dictionary in dictionaries:
-        jobs.extend((dictionary, final, "include") for final in sorted(RARE_FINALS))
+        for final in RARE_FINAL_PRIORITY:
+            max_start = RARE_PROBE_DEEP_START if final in DEEP_RARE_FINALS else RARE_PROBE_SHALLOW_START
+            jobs.extend((dictionary, final, "include", start) for start in range(1, max_start + 1, RARE_PROBE_PAGE_SIZE))
         if last_hangul_syllable(query) in RARE_FINALS:
-            jobs.append((dictionary, query, "start"))
-        jobs.extend((dictionary, word, "start") for word in sorted(KNOWN_RARE_WORD_PROBES) if word.startswith(query))
+            jobs.append((dictionary, query, "start", 1))
+        jobs.extend((dictionary, word, "start", 1) for word in sorted(KNOWN_RARE_WORD_PROBES) if word.startswith(query))
 
-    def probe(job: tuple[str, str, str]) -> tuple[list[dict], list[str]]:
-        dictionary, term, method = job
+    def probe(job: tuple[str, str, str, int]) -> tuple[list[dict], list[str]]:
+        dictionary, term, method, start = job
         try:
-            words, _total = fetch_dictionary(dictionary, term, 1, RARE_PROBE_PAGE_SIZE, filters, method)
+            words, _total = fetch_dictionary(dictionary, term, start, RARE_PROBE_PAGE_SIZE, filters, method)
             return words, []
         except ApiError as exc:
+            if "Invalid start value" in str(exc):
+                return [], []
             return [], [str(exc)]
 
     with ThreadPoolExecutor(max_workers=min(8, max(1, len(jobs)))) as executor:
@@ -347,6 +356,10 @@ def rare_final_candidates(dictionaries: list[str], query: str, filters: Filters)
                     current["dictionary_codes"].extend(code for code in word["dictionary_codes"] if code not in current["dictionary_codes"])
                 else:
                     merged[word["word"]] = word
+                if len(merged) >= RARE_CANDIDATE_LIMIT:
+                    break
+            if len(merged) >= RARE_CANDIDATE_LIMIT:
+                break
     return list(merged.values()), list(dict.fromkeys(warnings))
 
 
