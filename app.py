@@ -321,14 +321,14 @@ def merged_search(dictionaries: list[str], query: str, filters: Filters, limit: 
 
 
 def rare_final_candidates(dictionaries: list[str], query: str, filters: Filters) -> tuple[list[dict], list[str]]:
-    """희귀 끝글자를 포함하는 단어를 역으로 찾아 한방 후보를 보강한다."""
+    """희귀 끝글자로 끝나는 단어를 역으로 찾아 한방 후보를 보강한다."""
     merged: dict[str, dict] = {}
     warnings = []
     jobs: list[tuple[str, str, str, int]] = []
     for dictionary in dictionaries:
         for final in RARE_FINAL_PRIORITY:
             max_start = RARE_PROBE_DEEP_START if final in DEEP_RARE_FINALS else RARE_PROBE_SHALLOW_START
-            jobs.extend((dictionary, final, "include", start) for start in range(1, max_start + 1, RARE_PROBE_PAGE_SIZE))
+            jobs.extend((dictionary, final, "end", start) for start in range(1, max_start + 1, RARE_PROBE_PAGE_SIZE))
         if last_hangul_syllable(query) in RARE_FINALS:
             jobs.append((dictionary, query, "start", 1))
         jobs.extend((dictionary, word, "start", 1) for word in sorted(KNOWN_RARE_WORD_PROBES) if word.startswith(query))

@@ -114,9 +114,9 @@ class HelperTests(unittest.TestCase):
         linoleum = app.normalize_item({"word": "리놀륨", "sense": {"pos": "명사"}}, "opendict")
         safe = app.normalize_item({"word": "리튬이온", "sense": {"pos": "명사"}}, "opendict")
         def fake_fetch(_d, query, _s, _c, _f, method="start"):
-            if query == "튬" and method == "include":
+            if query == "튬" and method == "end":
                 return [shot, safe], 2
-            if query == "륨" and method == "include":
+            if query == "륨" and method == "end":
                 return [linoleum], 1
             return [], 0
         with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
@@ -128,16 +128,16 @@ class HelperTests(unittest.TestCase):
         magnesium = app.normalize_item({"word": "수산마그네슘", "sense": {"pos": "명사"}}, "opendict")
         other = app.normalize_item({"word": "마그네슘", "sense": {"pos": "명사"}}, "opendict")
         def fake_fetch(_d, query, _s, _c, _f, method="start"):
-            return ([magnesium, other], 2) if query == "슘" and method == "include" else ([], 0)
+            return ([magnesium, other], 2) if query == "슘" and method == "end" else ([], 0)
         with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
             words, warnings = app.rare_final_candidates(["opendict"], "수", app.Filters())
         self.assertEqual(warnings, [])
         self.assertEqual([word["word"] for word in words], ["수산마그네슘"])
 
-    def test_rare_final_candidates_scans_deeper_include_pages(self):
+    def test_rare_final_candidates_scans_deeper_end_pages(self):
         sodium = app.normalize_item({"word": "수산화나트륨", "sense": {"pos": "명사"}}, "opendict")
         def fake_fetch(_d, query, start, _c, _f, method="start"):
-            return ([sodium], 450) if query == "륨" and method == "include" and start == 101 else ([], 450)
+            return ([sodium], 450) if query == "륨" and method == "end" and start == 101 else ([], 450)
         with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
             words, warnings = app.rare_final_candidates(["opendict"], "수", app.Filters())
         self.assertEqual(warnings, [])
