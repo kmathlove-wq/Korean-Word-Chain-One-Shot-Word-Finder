@@ -64,6 +64,9 @@ HANGUL_VOWELS = ["ㅏ", "ㅐ", "ㅑ", "ㅒ", "ㅓ", "ㅔ", "ㅕ", "ㅖ", "ㅗ", 
 DUEUM_L_TO_IEUNG = {"ㅑ", "ㅕ", "ㅖ", "ㅛ", "ㅠ", "ㅣ"}
 DUEUM_L_TO_NIEUN = {"ㅏ", "ㅐ", "ㅗ", "ㅚ", "ㅜ", "ㅡ"}
 DUEUM_N_TO_IEUNG = {"ㅑ", "ㅕ", "ㅖ", "ㅛ", "ㅠ", "ㅣ"}
+# 끝말잇기에서 두음법칙으로 바꾸지 않는 고유어 끝음절.
+# '무릎'의 릎을 늪으로 바꾸는 식의 기계적 오적용을 막는다.
+DUEUM_EXCLUDED_SYLLABLES = {"릎"}
 
 DICTIONARIES = {
     "stdict": {
@@ -113,6 +116,8 @@ def compose_hangul(initial: str, vowel_index: int, final_index: int) -> str:
 
 def dueum_variant(syllable: str) -> str:
     if len(syllable) != 1 or not (HANGUL_BASE <= ord(syllable) <= HANGUL_END):
+        return syllable
+    if syllable in DUEUM_EXCLUDED_SYLLABLES:
         return syllable
     offset = ord(syllable) - HANGUL_BASE
     initial_index = offset // 588
