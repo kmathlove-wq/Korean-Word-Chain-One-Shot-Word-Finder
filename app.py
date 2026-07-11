@@ -62,11 +62,8 @@ HANGUL_END = 0xD7A3
 HANGUL_INITIALS = ["ㄱ", "ㄲ", "ㄴ", "ㄷ", "ㄸ", "ㄹ", "ㅁ", "ㅂ", "ㅃ", "ㅅ", "ㅆ", "ㅇ", "ㅈ", "ㅉ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ"]
 HANGUL_VOWELS = ["ㅏ", "ㅐ", "ㅑ", "ㅒ", "ㅓ", "ㅔ", "ㅕ", "ㅖ", "ㅗ", "ㅘ", "ㅙ", "ㅚ", "ㅛ", "ㅜ", "ㅝ", "ㅞ", "ㅟ", "ㅠ", "ㅡ", "ㅢ", "ㅣ"]
 DUEUM_L_TO_IEUNG = {"ㅑ", "ㅕ", "ㅖ", "ㅛ", "ㅠ", "ㅣ"}
-DUEUM_L_TO_NIEUN = {"ㅏ", "ㅐ", "ㅗ", "ㅚ", "ㅜ", "ㅡ"}
+DUEUM_L_TO_NIEUN = {"ㅏ", "ㅐ", "ㅓ", "ㅔ", "ㅗ", "ㅚ", "ㅜ", "ㅡ"}
 DUEUM_N_TO_IEUNG = {"ㅑ", "ㅕ", "ㅖ", "ㅛ", "ㅠ", "ㅣ"}
-# 음절만으로 한자음과 단어 구조를 판단할 수 없어 자동 두음 변환하지 않는
-# 끝음절. 실제 표준어가 있다는 이유만으로 임의 변환하지 않는다.
-DUEUM_EXCLUDED_SYLLABLES = {"륨", "릎", "락", "랑", "렌", "린"}
 
 DICTIONARIES = {
     "stdict": {
@@ -116,8 +113,6 @@ def compose_hangul(initial: str, vowel_index: int, final_index: int) -> str:
 
 def dueum_variant(syllable: str) -> str:
     if len(syllable) != 1 or not (HANGUL_BASE <= ord(syllable) <= HANGUL_END):
-        return syllable
-    if syllable in DUEUM_EXCLUDED_SYLLABLES:
         return syllable
     offset = ord(syllable) - HANGUL_BASE
     initial_index = offset // 588

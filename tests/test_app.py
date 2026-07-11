@@ -22,12 +22,12 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(app.get_dueum_variants("녀"), ["녀", "여"])
         self.assertEqual(app.get_dueum_variants("련"), ["련", "연"])
         self.assertEqual(app.get_dueum_variants("량"), ["량", "양"])
-        self.assertEqual(app.get_dueum_variants("락"), ["락"])
-        self.assertEqual(app.get_dueum_variants("랑"), ["랑"])
-        self.assertEqual(app.get_dueum_variants("렌"), ["렌"])
-        self.assertEqual(app.get_dueum_variants("린"), ["린"])
-        self.assertEqual(app.get_dueum_variants("륨"), ["륨"])
-        self.assertEqual(app.get_dueum_variants("릎"), ["릎"])
+        self.assertEqual(app.get_dueum_variants("락"), ["락", "낙"])
+        self.assertEqual(app.get_dueum_variants("랑"), ["랑", "낭"])
+        self.assertEqual(app.get_dueum_variants("렌"), ["렌", "넨"])
+        self.assertEqual(app.get_dueum_variants("린"), ["린", "인"])
+        self.assertEqual(app.get_dueum_variants("륨"), ["륨", "윰"])
+        self.assertEqual(app.get_dueum_variants("릎"), ["릎", "늪"])
         self.assertEqual(app.get_dueum_variants("각"), ["각"])
         self.assertEqual(app.last_hangul_syllable("기쁨(1)-"), "쁨")
 
@@ -261,22 +261,24 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual([word["word"] for word in words], ["수산화나트륨"])
 
-    def test_fast_analysis_does_not_change_ryum_to_yum(self):
+    def test_fast_analysis_changes_ryum_to_yum(self):
         candidate = app.normalize_item({"word": "리놀륨", "sense": {"pos": "명사"}}, "opendict")
-        with patch.object(app, "fetch_dictionary", return_value=([], 0)) as fetch:
+        follow = app.normalize_item({"word": "윰라대왕", "sense": {"pos": "명사"}}, "opendict")
+        with patch.object(app, "fetch_dictionary", side_effect=[([], 0), ([follow], 2)]) as fetch:
             analysed, warnings = app.analyse_words(["opendict"], [candidate], app.Filters(), True, exact_counts=False)
         self.assertEqual(warnings, [])
-        self.assertTrue(analysed[0]["is_one_shot"])
-        self.assertEqual(analysed[0]["next_word_count"], 0)
-        self.assertEqual([call.args[1] for call in fetch.call_args_list], ["륨"])
+        self.assertFalse(analysed[0]["is_one_shot"])
+        self.assertEqual(analysed[0]["next_word_count"], 2)
+        self.assertEqual([call.args[1] for call in fetch.call_args_list], ["륨", "윰"])
 
-    def test_dueum_does_not_change_knee_final_to_swamp(self):
+    def test_dueum_changes_knee_final_to_swamp(self):
         candidate = app.normalize_item({"word": "무릎", "sense": {"pos": "명사"}}, "stdict")
-        with patch.object(app, "fetch_dictionary", return_value=([], 0)) as fetch:
+        follow = app.normalize_item({"word": "늪가", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "fetch_dictionary", side_effect=[([], 0), ([follow], 1)]) as fetch:
             analysed, warnings = app.analyse_words(["stdict"], [candidate], app.Filters(), True, exact_counts=False)
         self.assertEqual(warnings, [])
-        self.assertTrue(analysed[0]["is_one_shot"])
-        self.assertEqual([call.args[1] for call in fetch.call_args_list], ["릎"])
+        self.assertFalse(analysed[0]["is_one_shot"])
+        self.assertEqual([call.args[1] for call in fetch.call_args_list], ["릎", "늪"])
 
     def test_fast_analysis_does_not_apply_dueum_when_disabled(self):
         candidate = app.normalize_item({"word": "리놀륨", "sense": {"pos": "명사"}}, "opendict")
