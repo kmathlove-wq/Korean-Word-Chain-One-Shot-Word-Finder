@@ -56,7 +56,7 @@ class HelperTests(unittest.TestCase):
     def test_one_shot_sort_uses_broader_candidate_pool(self):
         safe = app.normalize_item({"word": "가나", "sense": {"pos": "명사"}}, "stdict")
         shot = app.normalize_item({"word": "가슘", "sense": {"pos": "명사"}}, "stdict")
-        def count_for_syllable(_dictionaries, syllable, _filters, _dueum):
+        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True):
             return (0, []) if syllable == "슘" else (3, [])
         with patch.object(app, "merged_search", return_value=([safe, shot], 2, [])), \
              patch.object(app, "continuation_count", side_effect=count_for_syllable):
@@ -90,6 +90,14 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(count, 12)
         self.assertEqual(warnings, [])
         self.assertEqual([call.args[1] for call in fetch.call_args_list], ["련", "연"])
+
+    def test_fast_continuation_stops_after_first_match(self):
+        match = app.normalize_item({"word": "리가", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "fetch_dictionary", return_value=([match], 100)) as fetch:
+            count, warnings = app.continuation_count(["stdict", "opendict"], "리", app.Filters(), True, exact=False)
+        self.assertEqual(count, 100)
+        self.assertEqual(warnings, [])
+        self.assertEqual(fetch.call_count, 1)
 
 
 if __name__ == "__main__":

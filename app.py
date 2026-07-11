@@ -299,7 +299,7 @@ def merged_search(dictionaries: list[str], query: str, filters: Filters, limit: 
     return list(merged.values())[:limit], totals, warnings
 
 
-def continuation_count(dictionaries: list[str], syllable: str, filters: Filters, dueum: bool) -> tuple[int, list[str]]:
+def continuation_count(dictionaries: list[str], syllable: str, filters: Filters, dueum: bool, exact: bool = True) -> tuple[int, list[str]]:
     variants = get_dueum_variants(syllable) if dueum else [syllable]
     total_count = 0
     warnings = []
@@ -311,18 +311,20 @@ def continuation_count(dictionaries: list[str], syllable: str, filters: Filters,
                 if words:
                     # 필터를 통과한 항목이 확인되면 원 API의 시작 일치 결과 수를 표시한다.
                     total_count += total
+                    if not exact:
+                        return total_count, list(dict.fromkeys(warnings))
             except ApiError as exc:
                 warnings.append(str(exc))
     return total_count, list(dict.fromkeys(warnings))
 
 
-def analyse_words(dictionaries: list[str], candidates: list[dict], filters: Filters, dueum: bool) -> tuple[list[dict], list[str]]:
+def analyse_words(dictionaries: list[str], candidates: list[dict], filters: Filters, dueum: bool, exact_counts: bool = True) -> tuple[list[dict], list[str]]:
     syllables = {last_hangul_syllable(word["word"]) for word in candidates}
     counts: dict[str, tuple[int, list[str]]] = {}
     warnings = []
     # 서로 독립적인 끝 글자 조회를 병렬 처리해 순차 네트워크 대기를 없앤다.
     with ThreadPoolExecutor(max_workers=min(8, max(1, len(syllables)))) as executor:
-        futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum): syllable for syllable in syllables}
+        futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum, exact_counts): syllable for syllable in syllables}
         for future in as_completed(futures):
             counts[futures[future]] = future.result()
     analysed = []
@@ -404,7 +406,7 @@ def search():
         broad_sort = sort == "one-shot"
         if broad_sort:
             candidates, raw_total, warnings = merged_search(dictionaries, query, filters, SORT_CANDIDATES)
-            analysed, notes = analyse_words(dictionaries, candidates, filters, dueum)
+            analysed, notes = analyse_words(dictionaries, candidates, filters, dueum, exact_counts=False)
             warnings.extend(notes)
             ordered = order_words(analysed, sort)
             visible_pool = [word for word in ordered if mode != "one-shot" or word["is_one_shot"]]
@@ -413,7 +415,7 @@ def search():
             has_more = end < len(visible_pool)
         else:
             candidates, raw_total, warnings = paged_search(dictionaries, query, filters, page)
-            analysed, notes = analyse_words(dictionaries, candidates, filters, dueum)
+            analysed, notes = analyse_words(dictionaries, candidates, filters, dueum, exact_counts=mode != "one-shot")
             warnings.extend(notes)
             visible = [w for w in order_words(analysed, sort) if mode != "one-shot" or w["is_one_shot"]]
             has_more = page * PAGE_SIZE < raw_total
