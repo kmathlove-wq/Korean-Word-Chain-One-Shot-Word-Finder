@@ -27,7 +27,7 @@ app = Flask(__name__)
 PAGE_SIZE = 24
 API_PAGE_SIZE = 100
 MAX_CANDIDATES = 300
-SORT_CANDIDATES = 72
+SORT_CANDIDATES = MAX_CANDIDATES
 MAX_QUERY_LENGTH = 20
 CACHE_TTL = 60 * 30
 REQUEST_TIMEOUT = (10, 20)
@@ -403,7 +403,7 @@ def search():
         page = max(1, int(request.args.get("page", 1)))
         filters = Filters(**{name: as_bool(name) for name in Filters.__annotations__})
         dueum = as_bool("dueum", True)
-        broad_sort = sort == "one-shot"
+        broad_sort = sort == "one-shot" or mode == "one-shot"
         if broad_sort:
             candidates, raw_total, warnings = merged_search(dictionaries, query, filters, SORT_CANDIDATES)
             analysed, notes = analyse_words(dictionaries, candidates, filters, dueum, exact_counts=False)
