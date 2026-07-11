@@ -32,12 +32,13 @@ CACHE_TTL = 60 * 30
 REQUEST_TIMEOUT = (10, 20)
 REQUEST_ATTEMPTS = 2
 
-DUEUM_MAP = {
-    "녀": "여", "뇨": "요", "뉴": "유", "니": "이",
-    "랴": "야", "려": "여", "례": "예", "료": "요",
-    "류": "유", "리": "이", "라": "나", "래": "내",
-    "로": "노", "뢰": "뇌", "루": "누", "르": "느",
-}
+HANGUL_BASE = 0xAC00
+HANGUL_END = 0xD7A3
+HANGUL_INITIALS = ["ㄱ", "ㄲ", "ㄴ", "ㄷ", "ㄸ", "ㄹ", "ㅁ", "ㅂ", "ㅃ", "ㅅ", "ㅆ", "ㅇ", "ㅈ", "ㅉ", "ㅊ", "ㅋ", "ㅌ", "ㅍ", "ㅎ"]
+HANGUL_VOWELS = ["ㅏ", "ㅐ", "ㅑ", "ㅒ", "ㅓ", "ㅔ", "ㅕ", "ㅖ", "ㅗ", "ㅘ", "ㅙ", "ㅚ", "ㅛ", "ㅜ", "ㅝ", "ㅞ", "ㅟ", "ㅠ", "ㅡ", "ㅢ", "ㅣ"]
+DUEUM_L_TO_IEUNG = {"ㅑ", "ㅕ", "ㅖ", "ㅛ", "ㅠ", "ㅣ"}
+DUEUM_L_TO_NIEUN = {"ㅏ", "ㅐ", "ㅗ", "ㅚ", "ㅜ", "ㅡ"}
+DUEUM_N_TO_IEUNG = {"ㅑ", "ㅕ", "ㅖ", "ㅛ", "ㅠ", "ㅣ"}
 
 DICTIONARIES = {
     "stdict": {
@@ -81,9 +82,31 @@ class TTLCache:
 cache = TTLCache()
 
 
+def compose_hangul(initial: str, vowel_index: int, final_index: int) -> str:
+    return chr(HANGUL_BASE + HANGUL_INITIALS.index(initial) * 588 + vowel_index * 28 + final_index)
+
+
+def dueum_variant(syllable: str) -> str:
+    if len(syllable) != 1 or not (HANGUL_BASE <= ord(syllable) <= HANGUL_END):
+        return syllable
+    offset = ord(syllable) - HANGUL_BASE
+    initial_index = offset // 588
+    vowel_index = (offset % 588) // 28
+    final_index = offset % 28
+    initial = HANGUL_INITIALS[initial_index]
+    vowel = HANGUL_VOWELS[vowel_index]
+    if initial == "ㄹ" and vowel in DUEUM_L_TO_IEUNG:
+        return compose_hangul("ㅇ", vowel_index, final_index)
+    if initial == "ㄹ" and vowel in DUEUM_L_TO_NIEUN:
+        return compose_hangul("ㄴ", vowel_index, final_index)
+    if initial == "ㄴ" and vowel in DUEUM_N_TO_IEUNG:
+        return compose_hangul("ㅇ", vowel_index, final_index)
+    return syllable
+
+
 def get_dueum_variants(syllable: str) -> list[str]:
-    """원음과 요청서에 정의된 두음법칙 변환음을 반환한다."""
-    return list(dict.fromkeys([syllable, DUEUM_MAP.get(syllable, syllable)]))
+    """원음과 두음법칙 변환음을 중복 없이 반환한다."""
+    return list(dict.fromkeys([syllable, dueum_variant(syllable)]))
 
 
 def last_hangul_syllable(word: str) -> str:

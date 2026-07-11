@@ -20,6 +20,10 @@ SAMPLE = {
 class HelperTests(unittest.TestCase):
     def test_dueum_and_last_syllable(self):
         self.assertEqual(app.get_dueum_variants("녀"), ["녀", "여"])
+        self.assertEqual(app.get_dueum_variants("련"), ["련", "연"])
+        self.assertEqual(app.get_dueum_variants("량"), ["량", "양"])
+        self.assertEqual(app.get_dueum_variants("락"), ["락", "낙"])
+        self.assertEqual(app.get_dueum_variants("각"), ["각"])
         self.assertEqual(app.last_hangul_syllable("기쁨(1)-"), "쁨")
 
     def test_validation(self):
@@ -56,6 +60,14 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(count, 4043)
         self.assertEqual(warnings, [])
         self.assertEqual(fetch.call_args.args[3], app.API_PAGE_SIZE)
+
+    def test_continuation_checks_dueum_variant(self):
+        match = app.normalize_item({"word": "연가", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "fetch_dictionary", side_effect=[([], 0), ([match], 12)]) as fetch:
+            count, warnings = app.continuation_count(["stdict"], "련", app.Filters(), True)
+        self.assertEqual(count, 12)
+        self.assertEqual(warnings, [])
+        self.assertEqual([call.args[1] for call in fetch.call_args_list], ["련", "연"])
 
 
 if __name__ == "__main__":
