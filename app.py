@@ -691,7 +691,7 @@ def search():
         page = max(1, int(request.args.get("page", 1)))
         filters = Filters(**{name: as_bool(name) for name in Filters.__annotations__})
         dueum = as_bool("dueum", True)
-        broad_sort = sort == "one-shot" or mode == "one-shot"
+        broad_sort = sort in {"one-shot", "next"} or mode == "one-shot"
         if mode == "one-shot":
             warnings: list[str] = []
             if page == 1:
@@ -724,7 +724,7 @@ def search():
             visible = order_words([word for word in analysed if word["is_one_shot"]], sort)[:PAGE_SIZE]
         elif broad_sort:
             candidates, raw_total, warnings = paged_search(dictionaries, query, filters, page)
-            if sort == "one-shot":
+            if sort in {"one-shot", "next"}:
                 rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters)
                 warnings.extend(rare_warnings)
                 for word in rare_candidates:
@@ -736,8 +736,8 @@ def search():
                     if not any(existing["word"] == word["word"] for existing in candidates):
                         candidates.append(word)
                 raw_total = max(raw_total, len(candidates))
-            analysis_limit = NEXT_SORT_ANALYSIS_LIMIT if sort == "next" else ONE_SHOT_ANALYSIS_LIMIT
-            analysis_pool = candidates if sort == "next" else sorted(candidates, key=candidate_priority)
+            analysis_limit = len(candidates) if sort == "next" else ONE_SHOT_ANALYSIS_LIMIT
+            analysis_pool = sorted(candidates, key=candidate_priority)
             analysed, notes = analyse_words(
                 dictionaries,
                 analysis_pool[:analysis_limit],

@@ -36,7 +36,7 @@ function buildParams(page = 1) {
 function card(word) {
   const details = word.detail_url ? `<a href="${escapeHtml(word.detail_url)}" target="_blank" rel="noopener">사전에서 검색하기 ↗</a>` : '<span>검색 링크 없음</span>';
   const isNew = state.recentKeys.has(wordKey(word));
-  const nextCount = word.fast_judgement && word.next_word_count > 0 ? '있음' : `${word.next_word_count}개`;
+  const nextCount = `${word.next_word_count}개`;
   const hangulLength = (word.word.match(/[가-힣]/g) || []).length;
   const widthClass = hangulLength >= 18 ? ' very-wide' : hangulLength >= 10 ? ' wide' : '';
   return `<article class="word-card ${word.is_one_shot ? 'one-shot' : ''}${widthClass}"${isNew ? ' data-new-result="true"' : ''}>
@@ -70,9 +70,10 @@ function render(data) {
 
 function scrollToNewResults() {
   const firstNewResult = grid.querySelector('[data-new-result="true"]');
-  if (!firstNewResult) return;
+  if (!firstNewResult) return false;
   const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
-  requestAnimationFrame(() => firstNewResult.scrollIntoView({behavior, block: 'start'}));
+  requestAnimationFrame(() => requestAnimationFrame(() => firstNewResult.scrollIntoView({behavior, block: 'start'})));
+  return true;
 }
 
 async function requestSearch(params) {
@@ -115,11 +116,13 @@ async function search(page = 1, append = false) {
     const cached = append && state.prefetch?.key === key ? await state.prefetch.promise : null;
     if (cached?.error) throw cached.error;
     const data = cached?.data || await requestSearch(params);
+    const existingKeys = new Set(state.words.map(wordKey));
     const incomingWords = uniqueWords(data.words);
+    const newWords = append ? incomingWords.filter(word => !existingKeys.has(wordKey(word))) : [];
     const nextWords = uniqueWords(append ? [...state.words, ...incomingWords] : incomingWords);
-    state = {page, words: nextWords, hasMore: data.has_more, params: key, recentKeys: append ? new Set(incomingWords.map(wordKey)) : new Set(), prefetch: null};
+    state = {page, words: nextWords, hasMore: data.has_more, params: key, recentKeys: append ? new Set(newWords.map(wordKey)) : new Set(), prefetch: null};
     render(data);
-    if (append) scrollToNewResults();
+    if (append && !scrollToNewResults()) requestAnimationFrame(() => moreButton.scrollIntoView({behavior: 'smooth', block: 'center'}));
     if (!data.words.length && params.get('mode') === 'one-shot' && data.has_more) showMessage('이번 탐색 구간에서는 한방단어를 찾지 못했습니다. 아래의 다음 결과 보기를 누르면 더 뒤쪽 단어까지 정밀 탐색합니다.', 'notice');
     else if (!data.words.length && params.get('mode') === 'one-shot') showMessage('확인된 한방단어가 없습니다. 오류가 아니라, 선택한 사전과 필터 기준에서 끝까지 확인했지만 한방단어를 찾지 못한 상태입니다.', 'notice');
     else if (!data.words.length) showMessage('조건에 맞는 단어를 찾지 못했습니다. 필터를 바꿔 보세요.', 'notice');
