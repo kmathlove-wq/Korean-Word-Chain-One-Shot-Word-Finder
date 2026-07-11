@@ -6,10 +6,11 @@ const results = document.querySelector('#results');
 const grid = document.querySelector('#word-grid');
 const moreButton = document.querySelector('#more-button');
 const sortSelect = document.querySelector('#sort-select');
-let state = { page: 1, words: [], hasMore: false, params: null };
+let state = { page: 1, words: [], hasMore: false, params: null, recentKeys: new Set() };
 
 const setHidden = (element, hidden) => { element.hidden = hidden; };
 const escapeHtml = (value = '') => String(value).replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
+const wordKey = word => [word.word, word.dictionary, word.detail_url || '', word.definition].join('\u001f');
 
 function showMessage(text, kind = 'error') {
   message.textContent = text;
@@ -26,7 +27,8 @@ function buildParams(page = 1) {
 
 function card(word) {
   const details = word.detail_url ? `<a href="${escapeHtml(word.detail_url)}" target="_blank" rel="noopener">사전에서 자세히 보기 ↗</a>` : '<span>상세 링크 없음</span>';
-  return `<article class="word-card ${word.is_one_shot ? 'one-shot' : ''}">
+  const isNew = state.recentKeys.has(wordKey(word));
+  return `<article class="word-card ${word.is_one_shot ? 'one-shot' : ''}"${isNew ? ' data-new-result="true"' : ''}>
     <div class="card-top"><h3>${escapeHtml(word.word)}</h3>${word.is_one_shot ? '<span class="badge">한방단어</span>' : ''}</div>
     <p class="pos">${escapeHtml(word.part_of_speech)} · ${escapeHtml(word.dictionary)}</p>
     <p class="definition">${escapeHtml(word.definition)}</p>
@@ -54,28 +56,36 @@ function render(data) {
   setHidden(moreButton, !state.hasMore);
 }
 
+function scrollToNewResults() {
+  const firstNewResult = grid.querySelector('[data-new-result="true"]');
+  if (!firstNewResult) return;
+  const behavior = window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+  requestAnimationFrame(() => firstNewResult.scrollIntoView({behavior, block: 'start'}));
+}
+
 async function search(page = 1, append = false) {
   const params = append ? new URLSearchParams(state.params) : buildParams(page);
   params.set('page', page);
   const query = params.get('query');
   if (!/^[가-힣]{1,20}$/.test(query)) { showMessage(query ? '완성된 한글을 20자 이하로 입력해 주세요.' : '검색할 한글 글자나 단어를 입력해 주세요.'); queryInput.focus(); return; }
   setHidden(message, true); setHidden(loading, false); if (!append) setHidden(results, true);
+  moreButton.disabled = true;
   try {
     const response = await fetch(`/api/search?${params}`);
     const data = await response.json();
     if (!response.ok) throw new Error(data.error || '검색 중 오류가 발생했습니다.');
-    state = {page, words: append ? [...state.words, ...data.words] : data.words, hasMore: data.has_more, params: params.toString()};
+    state = {page, words: append ? [...state.words, ...data.words] : data.words, hasMore: data.has_more, params: params.toString(), recentKeys: append ? new Set(data.words.map(wordKey)) : new Set()};
     render(data);
+    if (append) scrollToNewResults();
     if (!data.words.length) showMessage('조건에 맞는 단어를 찾지 못했습니다. 필터를 바꿔 보세요.', 'notice');
     else if (data.warnings?.length) showMessage(`일부 결과 안내: ${data.warnings.join(' ')}`, 'notice');
   } catch (error) { showMessage(error.message); }
-  finally { setHidden(loading, true); }
+  finally { setHidden(loading, true); moreButton.disabled = false; }
 }
 
 form.addEventListener('submit', event => { event.preventDefault(); search(); });
-form.addEventListener('reset', () => setTimeout(() => { queryInput.value = ''; state = {page:1, words:[], hasMore:false, params:null}; setHidden(results,true); setHidden(message,true); }, 0));
+form.addEventListener('reset', () => setTimeout(() => { queryInput.value = ''; state = {page:1, words:[], hasMore:false, params:null, recentKeys:new Set()}; setHidden(results,true); setHidden(message,true); }, 0));
 document.querySelector('#clear-query').addEventListener('click', () => { queryInput.value = ''; queryInput.focus(); });
 moreButton.addEventListener('click', () => search(state.page + 1, true));
 sortSelect.addEventListener('change', () => { if (state.words.length) grid.innerHTML = sortedWords().map(card).join(''); });
 grid.addEventListener('click', async event => { const button = event.target.closest('[data-copy]'); if (!button) return; try { await navigator.clipboard.writeText(button.dataset.copy); button.textContent = '복사됨'; setTimeout(() => button.textContent = '복사', 1200); } catch { showMessage('클립보드에 복사하지 못했습니다.'); } });
-
