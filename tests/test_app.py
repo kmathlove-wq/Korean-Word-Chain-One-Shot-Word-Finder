@@ -98,6 +98,7 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(count, 100)
         self.assertEqual(warnings, [])
         self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(fetch.call_args.args[3], app.FAST_CONTINUATION_PAGE_SIZE)
 
     def test_one_shot_page_prioritizes_rare_finals(self):
         common = [app.normalize_item({"word": f"리가{i}", "sense": {"pos": "명사"}}, "stdict") for i in range(40)]

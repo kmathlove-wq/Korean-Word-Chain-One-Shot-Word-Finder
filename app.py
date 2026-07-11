@@ -28,8 +28,9 @@ PAGE_SIZE = 24
 API_PAGE_SIZE = 100
 MAX_CANDIDATES = 300
 SORT_CANDIDATES = MAX_CANDIDATES
-ONE_SHOT_CHUNK_SIZE = 24
-ONE_SHOT_ANALYSIS_LIMIT = 120
+ONE_SHOT_CHUNK_SIZE = 8
+ONE_SHOT_ANALYSIS_LIMIT = 80
+FAST_CONTINUATION_PAGE_SIZE = 20
 MAX_QUERY_LENGTH = 20
 CACHE_TTL = 60 * 30
 REQUEST_TIMEOUT = (10, 20)
@@ -309,11 +310,12 @@ def continuation_count(dictionaries: list[str], syllable: str, filters: Filters,
     variants = get_dueum_variants(syllable) if dueum else [syllable]
     total_count = 0
     warnings = []
+    page_size = API_PAGE_SIZE if exact else FAST_CONTINUATION_PAGE_SIZE
     for variant in variants:
         for dictionary in dictionaries:
             try:
                 # 첫 항목이 한 글자 등의 필터에 걸려도 오판하지 않도록 한 묶음을 확인한다.
-                words, total = fetch_dictionary(dictionary, variant, 1, API_PAGE_SIZE, filters)
+                words, total = fetch_dictionary(dictionary, variant, 1, page_size, filters)
                 if words:
                     # 필터를 통과한 항목이 확인되면 원 API의 시작 일치 결과 수를 표시한다.
                     total_count += total
@@ -329,7 +331,8 @@ def analyse_words(dictionaries: list[str], candidates: list[dict], filters: Filt
     counts: dict[str, tuple[int, list[str]]] = {}
     warnings = []
     # 서로 독립적인 끝 글자 조회를 병렬 처리해 순차 네트워크 대기를 없앤다.
-    with ThreadPoolExecutor(max_workers=min(8, max(1, len(syllables)))) as executor:
+    worker_limit = 8 if exact_counts else 4
+    with ThreadPoolExecutor(max_workers=min(worker_limit, max(1, len(syllables)))) as executor:
         futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum, exact_counts): syllable for syllable in syllables}
         for future in as_completed(futures):
             counts[futures[future]] = future.result()
