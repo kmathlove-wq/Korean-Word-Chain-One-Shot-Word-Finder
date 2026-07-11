@@ -37,7 +37,9 @@ function card(word) {
   const details = word.detail_url ? `<a href="${escapeHtml(word.detail_url)}" target="_blank" rel="noopener">사전에서 검색하기 ↗</a>` : '<span>검색 링크 없음</span>';
   const isNew = state.recentKeys.has(wordKey(word));
   const nextCount = word.fast_judgement && word.next_word_count > 0 ? '있음' : `${word.next_word_count}개`;
-  return `<article class="word-card ${word.is_one_shot ? 'one-shot' : ''}"${isNew ? ' data-new-result="true"' : ''}>
+  const hangulLength = (word.word.match(/[가-힣]/g) || []).length;
+  const widthClass = hangulLength >= 18 ? ' very-wide' : hangulLength >= 10 ? ' wide' : '';
+  return `<article class="word-card ${word.is_one_shot ? 'one-shot' : ''}${widthClass}"${isNew ? ' data-new-result="true"' : ''}>
     <div class="card-top"><h3>${escapeHtml(word.word)}</h3>${word.is_one_shot ? '<span class="badge">한방단어</span>' : ''}</div>
     <p class="pos">${escapeHtml(word.part_of_speech)} · ${escapeHtml(word.dictionary)}</p>
     <p class="definition">${escapeHtml(word.definition)}</p>

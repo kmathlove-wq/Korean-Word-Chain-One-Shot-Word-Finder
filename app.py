@@ -451,31 +451,41 @@ def prefix_expansion_candidates(dictionaries: list[str], query: str, seeds: list
 
     merged: dict[str, dict] = {}
     warnings: list[str] = []
-    for prefix in prefixes:
-        for dictionary in dictionaries:
-            for api_start in range(1, PREFIX_EXPANSION_SCAN_LIMIT + 1):
-                try:
-                    batch, total = fetch_dictionary(
-                        dictionary,
-                        prefix,
-                        api_start,
-                        PREFIX_EXPANSION_PAGE_SIZE,
-                        filters,
-                        request_timeout=FAST_REQUEST_TIMEOUT,
-                        attempts=1,
-                    )
-                except ApiError as exc:
-                    if "Invalid start value" in str(exc):
-                        break
-                    warnings.append(str(exc))
-                    break
+
+    def probe(job: tuple[str, str, int]) -> tuple[list[dict], list[str]]:
+        dictionary, prefix, api_start = job
+        try:
+            batch, _total = fetch_dictionary(
+                dictionary, prefix, api_start, PREFIX_EXPANSION_PAGE_SIZE, filters,
+                request_timeout=FAST_REQUEST_TIMEOUT, attempts=1,
+            )
+            return batch, []
+        except ApiError as exc:
+            return ([], []) if "Invalid start value" in str(exc) else ([], [str(exc)])
+
+    jobs = [
+        (dictionary, prefix, api_start)
+        for prefix in dict.fromkeys(prefixes)
+        for dictionary in dictionaries
+        for api_start in range(1, PREFIX_EXPANSION_SCAN_LIMIT + 1)
+    ]
+    if jobs:
+        with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as executor:
+            futures = [executor.submit(probe, job) for job in jobs]
+            for future in as_completed(futures):
+                batch, notes = future.result()
+                warnings.extend(notes)
                 for word in batch:
                     if not word["word"].startswith(query) or last_hangul_syllable(word["word"]) not in RARE_FINALS:
                         continue
                     merge_word(merged, word)
-                if api_start * PREFIX_EXPANSION_PAGE_SIZE >= total:
+                    if len(merged) >= RARE_CANDIDATE_LIMIT:
+                        break
+                if len(merged) >= RARE_CANDIDATE_LIMIT:
+                    for pending in futures:
+                        pending.cancel()
                     break
-    return list(merged.values()), list(dict.fromkeys(warnings))
+    return list(merged.values())[:RARE_CANDIDATE_LIMIT], list(dict.fromkeys(warnings))
 
 
 def continuation_count(dictionaries: list[str], syllable: str, filters: Filters, dueum: bool, exact: bool = True) -> tuple[int, list[str]]:
