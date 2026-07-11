@@ -230,7 +230,7 @@ def allowed(word: dict, filters: Filters) -> bool:
         return False
     pos, category, kind = word["part_of_speech"], word["category"], word["type"]
     joined = f"{pos} {category} {kind}"
-    if filters.noun_only and "명사" not in pos:
+    if filters.noun_only and "명사" not in pos and pos not in {"품사 미상", ""}:
         return False
     exclusions = [
         (filters.include_proper, "고유 명사"), (filters.include_north, "북한어"),

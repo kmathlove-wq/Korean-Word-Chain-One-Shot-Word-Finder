@@ -31,6 +31,11 @@ class HelperTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             app.validate_query("abc")
 
+    def test_unknown_part_of_speech_can_pass_noun_filter(self):
+        word = app.normalize_item({"word": "수산화나트륨", "sense": {"pos": "품사 미상"}}, "opendict")
+        filters = app.Filters(noun_only=True, include_technical=True)
+        self.assertTrue(app.allowed(word, filters))
+
     def test_json_parser(self):
         words, total = app.parse_json(SAMPLE, "stdict")
         self.assertEqual(total, 1)
