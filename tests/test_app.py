@@ -97,6 +97,14 @@ class HelperTests(unittest.TestCase):
         self.assertEqual([word["word"] for word in words], ["리튬"])
         self.assertEqual([call.args[2] for call in fetch.call_args_list], [1, 101])
 
+    def test_merged_search_stops_on_api_start_limit(self):
+        with patch.object(app, "fetch_dictionary", side_effect=[([], 2911), app.ApiError("Invalid start value")]) as fetch:
+            words, total, warnings = app.merged_search(["opendict"], "리", app.Filters(), limit=1)
+        self.assertEqual(words, [])
+        self.assertEqual(total, 2911)
+        self.assertEqual(warnings, [])
+        self.assertEqual(fetch.call_count, 2)
+
     def test_continuation_is_not_one_shot_when_filtered_match_exists(self):
         match = app.normalize_item({"word": "가가", "sense": {"pos": "명사"}}, "stdict")
         with patch.object(app, "fetch_dictionary", return_value=([match], 4043)) as fetch:

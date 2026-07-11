@@ -28,7 +28,7 @@ PAGE_SIZE = 24
 API_PAGE_SIZE = 100
 MAX_CANDIDATES = 300
 SORT_CANDIDATES = MAX_CANDIDATES
-MAX_API_SCAN = 2000
+MAX_API_SCAN = 1000
 ONE_SHOT_CHUNK_SIZE = 8
 ONE_SHOT_ANALYSIS_LIMIT = 80
 FAST_CONTINUATION_PAGE_SIZE = 20
@@ -284,9 +284,14 @@ def merged_search(dictionaries: list[str], query: str, filters: Filters, limit: 
             words, total = [], 0
             api_start = 1
             # 필터로 특정 API 묶음이 모두 제외되어도 뒤쪽에 허용 단어가 있을 수 있으므로
-            # reported_total 범위 안에서는 제한된 깊이까지 계속 훑는다.
+            # 공식 API가 허용하는 시작값 범위 안에서 제한된 깊이까지 계속 훑는다.
             while len(words) < limit and api_start <= MAX_API_SCAN:
-                batch, reported_total = fetch_dictionary(dictionary, query, api_start, API_PAGE_SIZE, filters)
+                try:
+                    batch, reported_total = fetch_dictionary(dictionary, query, api_start, API_PAGE_SIZE, filters)
+                except ApiError as exc:
+                    if "Invalid start value" in str(exc):
+                        break
+                    raise
                 total = reported_total
                 words.extend(batch)
                 if api_start + API_PAGE_SIZE > reported_total:
