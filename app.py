@@ -453,7 +453,7 @@ def search():
                 has_more = end < len(visible_pool)
         else:
             candidates, raw_total, warnings = paged_search(dictionaries, query, filters, page)
-            analysed, notes = analyse_words(dictionaries, candidates, filters, dueum, exact_counts=mode != "one-shot")
+            analysed, notes = analyse_words(dictionaries, candidates, filters, dueum, exact_counts=False)
             warnings.extend(notes)
             visible = [w for w in order_words(analysed, sort) if mode != "one-shot" or w["is_one_shot"]]
             has_more = page * PAGE_SIZE < raw_total

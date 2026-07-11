@@ -53,6 +53,14 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json["words"][0]["is_one_shot"])
 
+    def test_search_uses_fast_continuation_checks(self):
+        candidate = app.normalize_item(SAMPLE["channel"]["item"][0], "stdict")
+        with patch.object(app, "paged_search", return_value=([candidate], 1, [])), \
+             patch.object(app, "continuation_count", return_value=(1, [])) as count:
+            response = app.app.test_client().get("/api/search?query=기&dictionary=both&mode=all")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(count.call_args.args[4])
+
     def test_one_shot_sort_uses_broader_candidate_pool(self):
         safe = app.normalize_item({"word": "가나", "sense": {"pos": "명사"}}, "stdict")
         shot = app.normalize_item({"word": "가슘", "sense": {"pos": "명사"}}, "stdict")
