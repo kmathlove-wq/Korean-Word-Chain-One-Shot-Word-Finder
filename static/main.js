@@ -51,7 +51,8 @@ function sortedWords() {
 function render(data) {
   grid.innerHTML = sortedWords().map(card).join('');
   document.querySelector('#result-title').textContent = `‘${data.query}’로 시작하는 단어 ${data.total}개`;
-  document.querySelector('#result-meta').textContent = `한방단어 ${data.one_shot_count}개 · 기준 사전: ${data.dictionary_name} · 분석 ${data.analysed_count}개`;
+  const scope = data.broad_sort ? '우선 분석' : '분석';
+  document.querySelector('#result-meta').textContent = `한방단어 ${data.one_shot_count}개 · 기준 사전: ${data.dictionary_name} · ${scope} ${data.analysed_count}개`;
   setHidden(results, false);
   setHidden(moreButton, !state.hasMore);
 }
@@ -65,14 +66,22 @@ function scrollToNewResults() {
 
 async function requestSearch(params) {
   const response = await fetch(`/api/search?${params}`);
-  const data = await response.json();
-  if (!response.ok) throw new Error(data.error || '검색 중 오류가 발생했습니다.');
+  const text = await response.text();
+  let data = null;
+  try {
+    data = text ? JSON.parse(text) : null;
+  } catch {
+    throw new Error('서버 응답을 읽지 못했습니다. 잠시 후 다시 시도해 주세요.');
+  }
+  if (!response.ok) throw new Error(data?.error || '검색 중 오류가 발생했습니다.');
+  if (!data) throw new Error('서버 응답이 비어 있습니다. 잠시 후 다시 시도해 주세요.');
   return data;
 }
 
 function prefetchNextPage() {
   if (!state.hasMore || !state.params) return;
   const params = new URLSearchParams(state.params);
+  if (params.get('sort') === 'one-shot' || params.get('mode') === 'one-shot') return;
   params.set('page', state.page + 1);
   const key = params.toString();
   state.prefetch = {

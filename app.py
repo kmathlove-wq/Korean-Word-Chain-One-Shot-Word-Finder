@@ -27,6 +27,7 @@ app = Flask(__name__)
 PAGE_SIZE = 24
 API_PAGE_SIZE = 100
 MAX_CANDIDATES = 300
+SORT_CANDIDATES = 96
 MAX_QUERY_LENGTH = 20
 CACHE_TTL = 60 * 30
 REQUEST_TIMEOUT = (10, 20)
@@ -400,8 +401,9 @@ def search():
         page = max(1, int(request.args.get("page", 1)))
         filters = Filters(**{name: as_bool(name) for name in Filters.__annotations__})
         dueum = as_bool("dueum", True)
-        if sort == "one-shot" or mode == "one-shot":
-            candidates, raw_total, warnings = merged_search(dictionaries, query, filters, MAX_CANDIDATES)
+        broad_sort = sort == "one-shot" or mode == "one-shot"
+        if broad_sort:
+            candidates, raw_total, warnings = merged_search(dictionaries, query, filters, SORT_CANDIDATES)
             analysed, notes = analyse_words(dictionaries, candidates, filters, dueum)
             warnings.extend(notes)
             ordered = order_words(analysed, sort)
@@ -419,7 +421,7 @@ def search():
         return jsonify(query=query, dictionary=request.args.get("dictionary", "stdict"), dictionary_name=" + ".join(DICTIONARIES[x]["name"] for x in dictionaries),
                        total=raw_total, api_total=raw_total, one_shot_count=one_shot_count,
                        page=page, page_size=PAGE_SIZE, has_more=has_more,
-                       analysed_count=len(analysed), words=visible, warnings=list(dict.fromkeys(warnings)))
+                       analysed_count=len(analysed), broad_sort=broad_sort, words=visible, warnings=list(dict.fromkeys(warnings)))
     except (ValueError, TypeError) as exc:
         return jsonify(error=str(exc)), 400
     except ApiError as exc:
