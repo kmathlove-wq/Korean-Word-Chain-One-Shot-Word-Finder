@@ -246,10 +246,11 @@ def exact_word_key(word: dict) -> tuple[str, str, str]:
     return (compact_text(word.get("word", "")), compact_text(word.get("part_of_speech", "")), compact_text(word.get("definition", "")))
 
 
-def dedupe_exact_words(words: list[dict]) -> list[dict]:
-    merged: dict[tuple[str, str, str], dict] = {}
+def dedupe_display_words(words: list[dict]) -> list[dict]:
+    """API가 반복해서 준 같은 표제어는 화면에서 하나로 합친다."""
+    merged: dict[tuple[str], dict] = {}
     for word in words:
-        merge_word(merged, word, exact_word_key(word))
+        merge_word(merged, word, (compact_text(word.get("word", "")),))
     return list(merged.values())
 
 
@@ -685,22 +686,18 @@ def search():
             warnings: list[str] = []
             if page == 1:
                 candidates: list[dict] = []
+                # 한 접두 계열을 찾았더라도 다른 계열을 놓치지 않도록
+                # 희귀 끝글자 역검색 결과를 항상 합친다(예: 무수…륨 + 무릎).
+                rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters)
+                warnings.extend(rare_warnings)
+                for word in rare_candidates:
+                    if not any(existing["word"] == word["word"] for existing in candidates):
+                        candidates.append(word)
                 expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
                 warnings.extend(expanded_warnings)
                 for word in expanded_candidates:
                     if not any(existing["word"] == word["word"] for existing in candidates):
                         candidates.append(word)
-                if not candidates:
-                    rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters)
-                    warnings.extend(rare_warnings)
-                    for word in rare_candidates:
-                        if not any(existing["word"] == word["word"] for existing in candidates):
-                            candidates.append(word)
-                    expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
-                    warnings.extend(expanded_warnings)
-                    for word in expanded_candidates:
-                        if not any(existing["word"] == word["word"] for existing in candidates):
-                            candidates.append(word)
                 if candidates:
                     raw_total, total_warnings = starting_total(dictionaries, query, filters)
                     warnings.extend(total_warnings)
@@ -718,22 +715,16 @@ def search():
         elif broad_sort:
             candidates, raw_total, warnings = paged_search(dictionaries, query, filters, page)
             if sort == "one-shot":
+                rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters)
+                warnings.extend(rare_warnings)
+                for word in rare_candidates:
+                    if not any(existing["word"] == word["word"] for existing in candidates):
+                        candidates.append(word)
                 expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
                 warnings.extend(expanded_warnings)
                 for word in expanded_candidates:
                     if not any(existing["word"] == word["word"] for existing in candidates):
                         candidates.append(word)
-                if not any(last_hangul_syllable(word["word"]) in RARE_FINALS for word in candidates):
-                    rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters)
-                    warnings.extend(rare_warnings)
-                    for word in rare_candidates:
-                        if not any(existing["word"] == word["word"] for existing in candidates):
-                            candidates.append(word)
-                    expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
-                    warnings.extend(expanded_warnings)
-                    for word in expanded_candidates:
-                        if not any(existing["word"] == word["word"] for existing in candidates):
-                            candidates.append(word)
                 raw_total = max(raw_total, len(candidates))
             analysis_limit = NEXT_SORT_ANALYSIS_LIMIT if sort == "next" else ONE_SHOT_ANALYSIS_LIMIT
             analysis_pool = candidates if sort == "next" else sorted(candidates, key=candidate_priority)
@@ -764,7 +755,7 @@ def search():
             warnings.extend(notes)
             visible = [w for w in order_words(analysed, sort) if mode != "one-shot" or w["is_one_shot"]]
             has_more = page * PAGE_SIZE < raw_total
-        visible = dedupe_exact_words(visible)
+        visible = dedupe_display_words(visible)
         one_shot_count = sum(word["is_one_shot"] for word in analysed)
         return jsonify(query=query, dictionary=request.args.get("dictionary", "stdict"), dictionary_name=" + ".join(DICTIONARIES[x]["name"] for x in dictionaries),
                        total=raw_total, api_total=raw_total, one_shot_count=one_shot_count,

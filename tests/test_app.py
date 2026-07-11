@@ -77,9 +77,9 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         count.assert_called_once()
 
-    def test_response_removes_exact_duplicate_words(self):
+    def test_response_merges_duplicate_headwords_even_when_metadata_differs(self):
         duplicate_a = app.normalize_item({"word": "인듐", "sense": {"pos": "명사", "definition": "은백색의 무른 금속 원소."}}, "stdict")
-        duplicate_b = app.normalize_item({"word": "인듐", "sense": {"pos": "명사", "definition": "은백색의 무른 금속 원소."}}, "stdict")
+        duplicate_b = app.normalize_item({"word": "인듐", "sense": {"pos": "품사 없음", "definition": "은백색의 무른 금속 원소. "}}, "stdict")
         with patch.object(app, "rare_final_candidates", return_value=([duplicate_a, duplicate_b], [])), \
              patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
              patch.object(app, "starting_total", return_value=(2, [])), \
@@ -87,6 +87,23 @@ class HelperTests(unittest.TestCase):
             response = app.app.test_client().get("/api/search?query=인&dictionary=stdict&mode=one-shot&sort=alphabet")
         self.assertEqual(response.status_code, 200)
         self.assertEqual([word["word"] for word in response.json["words"]], ["인듐"])
+
+    def test_one_shot_mode_combines_prefix_and_other_rare_final_families(self):
+        knee = app.normalize_item({"word": "무릎", "sense": {"pos": "명사", "definition": "넓적다리와 정강이 사이."}}, "stdict")
+        sodium = app.normalize_item({"word": "무수탄산나트륨", "sense": {"pos": "품사 없음", "definition": "탄산 나트륨 무수물."}}, "stdict")
+
+        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True):
+            return (0, []) if syllable in {"릎", "륨"} else (10, [])
+
+        with patch.object(app, "rare_final_candidates", return_value=([knee], [])) as rare, \
+             patch.object(app, "prefix_expansion_candidates", return_value=([sodium], [])), \
+             patch.object(app, "starting_total", return_value=(3449, [])), \
+             patch.object(app, "continuation_count", side_effect=count_for_syllable):
+            response = app.app.test_client().get("/api/search?query=무&dictionary=stdict&mode=one-shot&sort=alphabet&dueum=false")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([word["word"] for word in response.json["words"]], ["무릎", "무수탄산나트륨"])
+        rare.assert_called_once()
 
     def test_next_sort_uses_fast_continuation_counts_for_all_syllables(self):
         many = app.normalize_item({"word": "장가", "sense": {"pos": "명사"}}, "stdict")
