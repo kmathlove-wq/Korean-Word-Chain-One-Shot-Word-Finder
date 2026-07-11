@@ -99,6 +99,16 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual(fetch.call_count, 1)
 
+    def test_one_shot_page_prioritizes_rare_finals(self):
+        common = [app.normalize_item({"word": f"리가{i}", "sense": {"pos": "명사"}}, "stdict") for i in range(40)]
+        lithium = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
+        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True):
+            return (0, []) if syllable == "튬" else (10, [])
+        with patch.object(app, "continuation_count", side_effect=count_for_syllable):
+            _analysed, visible, _has_more, warnings = app.one_shot_page(["stdict"], common + [lithium], app.Filters(), True, 1)
+        self.assertEqual(warnings, [])
+        self.assertEqual(visible[0]["word"], "리튬")
+
 
 if __name__ == "__main__":
     unittest.main()

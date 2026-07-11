@@ -28,10 +28,16 @@ PAGE_SIZE = 24
 API_PAGE_SIZE = 100
 MAX_CANDIDATES = 300
 SORT_CANDIDATES = MAX_CANDIDATES
+ONE_SHOT_CHUNK_SIZE = 24
+ONE_SHOT_ANALYSIS_LIMIT = 120
 MAX_QUERY_LENGTH = 20
 CACHE_TTL = 60 * 30
 REQUEST_TIMEOUT = (10, 20)
 REQUEST_ATTEMPTS = 2
+RARE_FINALS = {
+    "튬", "듐", "륨", "슘", "븀", "늄", "뮴", "윰", "쥼", "줌",
+    "릇", "릎", "릉", "쁨", "쯤", "낌", "깡", "꽝", "쩡",
+}
 
 HANGUL_BASE = 0xAC00
 HANGUL_END = 0xD7A3
@@ -350,6 +356,31 @@ def order_words(words: list[dict], sort: str) -> list[dict]:
     return sorted(words, key=lambda word: word["word"])
 
 
+def candidate_priority(word: dict) -> tuple[int, int, str]:
+    last = last_hangul_syllable(word["word"])
+    return (0 if last in RARE_FINALS else 1, len(word["word"]), word["word"])
+
+
+def one_shot_page(dictionaries: list[str], candidates: list[dict], filters: Filters, dueum: bool, page: int) -> tuple[list[dict], list[dict], bool, list[str]]:
+    ordered = sorted(candidates, key=candidate_priority)
+    needed = page * PAGE_SIZE
+    analysed: list[dict] = []
+    one_shots: list[dict] = []
+    warnings: list[str] = []
+    for start in range(0, min(len(ordered), ONE_SHOT_ANALYSIS_LIMIT), ONE_SHOT_CHUNK_SIZE):
+        chunk = ordered[start:start + ONE_SHOT_CHUNK_SIZE]
+        checked, notes = analyse_words(dictionaries, chunk, filters, dueum, exact_counts=False)
+        analysed.extend(checked)
+        warnings.extend(notes)
+        one_shots.extend(word for word in checked if word["is_one_shot"])
+        if len(one_shots) >= needed:
+            break
+    start, end = (page - 1) * PAGE_SIZE, page * PAGE_SIZE
+    reached_limit = len(analysed) >= min(len(ordered), ONE_SHOT_ANALYSIS_LIMIT)
+    has_more = end < len(one_shots) or (len(one_shots) < needed and not reached_limit)
+    return analysed, one_shots[start:end], has_more, warnings
+
+
 def paged_search(dictionaries: list[str], query: str, filters: Filters, page: int) -> tuple[list[dict], int, list[str]]:
     """화면에 필요한 한 페이지만 가져와 첫 응답 시간을 제한한다."""
     merged: dict[str, dict] = {}
@@ -406,13 +437,17 @@ def search():
         broad_sort = sort == "one-shot" or mode == "one-shot"
         if broad_sort:
             candidates, raw_total, warnings = merged_search(dictionaries, query, filters, SORT_CANDIDATES)
-            analysed, notes = analyse_words(dictionaries, candidates, filters, dueum, exact_counts=False)
-            warnings.extend(notes)
-            ordered = order_words(analysed, sort)
-            visible_pool = [word for word in ordered if mode != "one-shot" or word["is_one_shot"]]
-            start, end = (page - 1) * PAGE_SIZE, page * PAGE_SIZE
-            visible = visible_pool[start:end]
-            has_more = end < len(visible_pool)
+            if mode == "one-shot":
+                analysed, visible, has_more, notes = one_shot_page(dictionaries, candidates, filters, dueum, page)
+                warnings.extend(notes)
+            else:
+                analysed, notes = analyse_words(dictionaries, sorted(candidates, key=candidate_priority)[:ONE_SHOT_ANALYSIS_LIMIT], filters, dueum, exact_counts=False)
+                warnings.extend(notes)
+                ordered = order_words(analysed, sort)
+                visible_pool = [word for word in ordered if mode != "one-shot" or word["is_one_shot"]]
+                start, end = (page - 1) * PAGE_SIZE, page * PAGE_SIZE
+                visible = visible_pool[start:end]
+                has_more = end < len(visible_pool)
         else:
             candidates, raw_total, warnings = paged_search(dictionaries, query, filters, page)
             analysed, notes = analyse_words(dictionaries, candidates, filters, dueum, exact_counts=mode != "one-shot")
