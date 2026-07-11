@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="끝말잇기 한방단어 검색기는 표준국어대사전과 우리말샘을 바탕으로 시작 단어, 뜻, 품사, 이어갈 단어 수와 한방단어를 찾아주는 검색 서비스입니다.">
+  <title>끝말잇기 한방단어 검색기</title>
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename='images/word-chain-logo.png') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <header class="hero">
+    <div class="hero__inner">
+      <a class="brand" href="/" aria-label="끝말잇기 한방단어 검색기 처음으로"><img src="{{ url_for('static', filename='images/word-chain-logo.png') }}" alt=""> 끝말잇기 한방단어 검색기</a>
+      <div class="hero__copy">
+        <p class="eyebrow">KOREAN WORD CHAIN FINDER</p>
+        <h1>끝말잇기의 다음 수를<br><em>한눈에 찾아보세요.</em></h1>
+        <p>표준국어대사전과 우리말샘을 기준으로<br class="desktop-only"> 시작 단어와 한방단어를 정확하게 분석합니다.</p>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <section class="search-panel" aria-labelledby="search-title">
+      <h2 id="search-title" class="sr-only">단어 검색</h2>
+      <form id="search-form" novalidate>
+        <fieldset class="segment-field">
+          <legend>검색할 사전</legend>
+          <div class="segments">
+            <label><input type="radio" name="dictionary" value="stdict" checked><span>표준국어대사전</span></label>
+            <label><input type="radio" name="dictionary" value="opendict"><span>우리말샘</span></label>
+            <label><input type="radio" name="dictionary" value="both"><span>두 사전 모두</span></label>
+          </div>
+        </fieldset>
+
+        <label class="query-label" for="query">어떤 글자로 시작할까요?</label>
+        <div class="query-row">
+          <div class="input-wrap"><input id="query" name="query" maxlength="20" autocomplete="off" placeholder="예: 기" aria-describedby="query-help"><button type="button" id="clear-query" aria-label="검색어 지우기">×</button></div>
+          <button class="primary" type="submit"><span>단어 찾기</span><span aria-hidden="true">→</span></button>
+        </div>
+        <p id="query-help" class="helper">완성된 한글 한 글자 또는 여러 글자를 입력하세요.</p>
+
+        <details class="options" open>
+          <summary>상세 검색 설정 <span>필터와 검색 유형을 선택할 수 있어요</span></summary>
+          <div class="options__body">
+            <fieldset>
+              <legend>검색 유형</legend>
+              <div class="inline-radios">
+                <label><input type="radio" name="mode" value="all" checked> 둘 다</label>
+                <label><input type="radio" name="mode" value="words"> 시작하는 단어</label>
+                <label><input type="radio" name="mode" value="one-shot"> 한방단어</label>
+              </div>
+            </fieldset>
+            <fieldset>
+              <legend>단어 필터</legend>
+              <div class="checks">
+                <label><input type="checkbox" name="noun_only"><span>명사만 보기</span></label>
+                <label><input type="checkbox" name="include_proper"><span>고유명사 포함</span></label>
+                <label><input type="checkbox" name="include_north"><span>북한어 포함</span></label>
+                <label><input type="checkbox" name="include_dialect"><span>방언 포함</span></label>
+                <label><input type="checkbox" name="include_old"><span>옛말 포함</span></label>
+                <label><input type="checkbox" name="include_technical"><span>전문어 포함</span></label>
+                <label><input type="checkbox" name="include_single"><span>한 글자 포함</span></label>
+                <label><input type="checkbox" name="dueum" checked><span>두음법칙 적용</span></label>
+              </div>
+            </fieldset>
+            <button class="reset" type="reset">설정 초기화</button>
+          </div>
+        </details>
+      </form>
+    </section>
+
+    <div id="message" class="message" role="alert" hidden></div>
+    <section id="loading" class="loading" aria-live="polite" hidden>
+      <span class="spinner" aria-hidden="true"></span>
+      <div><strong>단어와 한방단어를 분석하고 있어요</strong><p>같은 끝 글자는 한 번만 확인해 API 호출을 줄입니다.</p></div>
+    </section>
+
+    <section id="results" class="results" aria-labelledby="result-title" hidden>
+      <div class="results__head">
+        <div><p class="eyebrow">SEARCH RESULT</p><h2 id="result-title"></h2><p id="result-meta"></p></div>
+        <label class="sort">정렬 <select id="sort-select"><option value="alphabet">가나다순</option><option value="short">짧은 순</option><option value="long">긴 순</option><option value="next">이어갈 단어가 적은 순</option><option value="one-shot">한방단어 우선</option></select></label>
+      </div>
+      <div id="word-grid" class="word-grid"></div>
+      <button id="more-button" class="more" type="button" hidden>다음 결과 보기 <span aria-hidden="true">↓</span></button>
+    </section>
+  </main>
+
+  <footer>
+    <div><strong>끝말잇기 한방단어 검색기</strong><p>끝말잇기의 즐거운 한 수를 돕습니다.</p></div>
+    <p>검색 결과는 <a href="https://stdict.korean.go.kr" target="_blank" rel="noopener">표준국어대사전</a> 및 <a href="https://opendict.korean.go.kr" target="_blank" rel="noopener">우리말샘</a>의 공개 데이터를 기준으로 합니다.<br>게임별 허용 규칙이 다를 수 있으며, 한방단어 판정은 선택한 사전과 필터에 따라 달라집니다.</p>
+  </footer>
+  <script src="{{ url_for('static', filename='main.js') }}" defer></script>
+</body>
+</html>

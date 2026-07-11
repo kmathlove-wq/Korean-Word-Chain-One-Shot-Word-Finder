@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: word-chain-one-shot-search
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    healthCheckPath: /api/health
+    envVars:
+      - key: STDICT_API_KEY
+        sync: false
+      - key: OPENDICT_API_KEY
+        sync: false
