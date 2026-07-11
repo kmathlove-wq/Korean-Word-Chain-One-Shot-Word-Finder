@@ -39,7 +39,9 @@ RARE_PROBE_SHALLOW_START = 2
 RARE_CANDIDATE_LIMIT = 120
 ONE_SHOT_CHUNK_SIZE = 8
 ONE_SHOT_ANALYSIS_LIMIT = 80
-FAST_CONTINUATION_PAGE_SIZE = 20
+NEXT_SORT_ANALYSIS_LIMIT = PAGE_SIZE * 2
+FAST_CONTINUATION_PAGE_SIZE = API_PAGE_SIZE
+FAST_REQUEST_TIMEOUT = (2, 3)
 MAX_QUERY_LENGTH = 20
 CACHE_TTL = 60 * 30
 REQUEST_TIMEOUT = (10, 20)
@@ -53,6 +55,7 @@ DEEP_RARE_FINALS = {"륨", "슘", "튬", "듐", "늄"}
 KNOWN_RARE_WORD_PROBES = {
     "리놀륨",
 }
+PREFIX_PROBE_SUFFIXES = ["산", "산화", "산수소", "화", "화나", "수소", "수산", "수산화"]
 
 HANGUL_BASE = 0xAC00
 HANGUL_END = 0xD7A3
@@ -226,6 +229,30 @@ def normalize_item(item: dict, dictionary: str) -> dict:
     }
 
 
+def compact_text(value: str) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
+def merge_word(target: dict, word: dict, key: tuple | None = None) -> None:
+    merge_key = key or (word["word"],)
+    current = target.get(merge_key)
+    if current:
+        current["dictionary_codes"].extend(code for code in word["dictionary_codes"] if code not in current["dictionary_codes"])
+    else:
+        target[merge_key] = word
+
+
+def exact_word_key(word: dict) -> tuple[str, str, str]:
+    return (compact_text(word.get("word", "")), compact_text(word.get("part_of_speech", "")), compact_text(word.get("definition", "")))
+
+
+def dedupe_exact_words(words: list[dict]) -> list[dict]:
+    merged: dict[tuple[str, str, str], dict] = {}
+    for word in words:
+        merge_word(merged, word, exact_word_key(word))
+    return list(merged.values())
+
+
 def allowed(word: dict, filters: Filters) -> bool:
     word_text = word["word"]
     if not word_text or not last_hangul_syllable(word_text):
@@ -234,7 +261,7 @@ def allowed(word: dict, filters: Filters) -> bool:
         return False
     pos, category, kind = word["part_of_speech"], word["category"], word["type"]
     joined = f"{pos} {category} {kind}"
-    if filters.noun_only and "명사" not in pos and pos not in {"품사 미상", ""}:
+    if filters.noun_only and "명사" not in pos and pos not in {"품사 미상", "품사 없음", ""}:
         return False
     exclusions = [
         (filters.include_proper, "고유 명사"), (filters.include_north, "북한어"),
@@ -247,7 +274,16 @@ def allowed(word: dict, filters: Filters) -> bool:
     return True
 
 
-def fetch_dictionary(dictionary: str, query: str, start: int, count: int, filters: Filters, method: str = "start") -> tuple[list[dict], int]:
+def fetch_dictionary(
+    dictionary: str,
+    query: str,
+    start: int,
+    count: int,
+    filters: Filters,
+    method: str = "start",
+    request_timeout: tuple[int, int] = REQUEST_TIMEOUT,
+    attempts: int = REQUEST_ATTEMPTS,
+) -> tuple[list[dict], int]:
     config = DICTIONARIES[dictionary]
     key = os.getenv(config["key_env"], "").strip()
     if not key:
@@ -258,14 +294,14 @@ def fetch_dictionary(dictionary: str, query: str, start: int, count: int, filter
         return cached
     params = {"key": key, "q": query, "req_type": "json", "type_search": "search", "method": method, "start": start, "num": count, "advanced": "y"}
     last_error: requests.RequestException | None = None
-    for attempt in range(REQUEST_ATTEMPTS):
+    for attempt in range(attempts):
         try:
-            response = requests.get(config["endpoint"], params=params, timeout=REQUEST_TIMEOUT)
+            response = requests.get(config["endpoint"], params=params, timeout=request_timeout)
             response.raise_for_status()
             break
         except requests.RequestException as exc:
             last_error = exc
-            if attempt + 1 < REQUEST_ATTEMPTS:
+            if attempt + 1 < attempts:
                 time.sleep(0.35)
     else:
         if isinstance(last_error, requests.Timeout):
@@ -312,11 +348,7 @@ def merged_search(dictionaries: list[str], query: str, filters: Filters, limit: 
                 api_start += 1
             totals += total
             for word in words:
-                current = merged.get(word["word"])
-                if current:
-                    current["dictionary_codes"].extend(x for x in word["dictionary_codes"] if x not in current["dictionary_codes"])
-                else:
-                    merged[word["word"]] = word
+                merge_word(merged, word)
         except ApiError as exc:
             warnings.append(str(exc))
     if not merged and warnings:
@@ -350,11 +382,7 @@ def rare_final_candidates(dictionaries: list[str], query: str, filters: Filters)
                 for word in words:
                     if not word["word"].startswith(query) or last_hangul_syllable(word["word"]) not in RARE_FINALS:
                         continue
-                    current = merged.get(word["word"])
-                    if current:
-                        current["dictionary_codes"].extend(code for code in word["dictionary_codes"] if code not in current["dictionary_codes"])
-                    else:
-                        merged[word["word"]] = word
+                    merge_word(merged, word)
                     if len(merged) >= RARE_CANDIDATE_LIMIT:
                         return True
         return bool(merged)
@@ -392,11 +420,7 @@ def one_shot_scan_candidates(dictionaries: list[str], query: str, filters: Filte
                 warnings.append(str(exc))
                 break
             for word in batch:
-                current = merged.get(word["word"])
-                if current:
-                    current["dictionary_codes"].extend(code for code in word["dictionary_codes"] if code not in current["dictionary_codes"])
-                else:
-                    merged[word["word"]] = word
+                merge_word(merged, word)
             if api_start * API_PAGE_SIZE >= dictionary_total:
                 break
         total += dictionary_total
@@ -408,6 +432,9 @@ def one_shot_scan_candidates(dictionaries: list[str], query: str, filters: Filte
 def prefix_expansion_candidates(dictionaries: list[str], query: str, seeds: list[dict], filters: Filters) -> tuple[list[dict], list[str]]:
     """이미 찾은 희귀 끝글자 후보의 앞부분으로 다시 좁혀 숨은 같은 계열 후보를 찾는다."""
     prefixes: list[str] = []
+    if len(query) == 1:
+        for suffix in PREFIX_PROBE_SUFFIXES:
+            prefixes.append(query + suffix)
     for seed in sorted(seeds, key=lambda word: (len(word["word"]), word["word"])):
         text = seed["word"]
         if not text.startswith(query) or last_hangul_syllable(text) not in RARE_FINALS:
@@ -427,7 +454,15 @@ def prefix_expansion_candidates(dictionaries: list[str], query: str, seeds: list
         for dictionary in dictionaries:
             for api_start in range(1, PREFIX_EXPANSION_SCAN_LIMIT + 1):
                 try:
-                    batch, total = fetch_dictionary(dictionary, prefix, api_start, PREFIX_EXPANSION_PAGE_SIZE, filters)
+                    batch, total = fetch_dictionary(
+                        dictionary,
+                        prefix,
+                        api_start,
+                        PREFIX_EXPANSION_PAGE_SIZE,
+                        filters,
+                        request_timeout=FAST_REQUEST_TIMEOUT,
+                        attempts=1,
+                    )
                 except ApiError as exc:
                     if "Invalid start value" in str(exc):
                         break
@@ -436,11 +471,7 @@ def prefix_expansion_candidates(dictionaries: list[str], query: str, seeds: list
                 for word in batch:
                     if not word["word"].startswith(query) or last_hangul_syllable(word["word"]) not in RARE_FINALS:
                         continue
-                    current = merged.get(word["word"])
-                    if current:
-                        current["dictionary_codes"].extend(code for code in word["dictionary_codes"] if code not in current["dictionary_codes"])
-                    else:
-                        merged[word["word"]] = word
+                    merge_word(merged, word)
                 if api_start * PREFIX_EXPANSION_PAGE_SIZE >= total:
                     break
     return list(merged.values()), list(dict.fromkeys(warnings))
@@ -451,11 +482,21 @@ def continuation_count(dictionaries: list[str], syllable: str, filters: Filters,
     total_count = 0
     warnings = []
     page_size = API_PAGE_SIZE if exact else FAST_CONTINUATION_PAGE_SIZE
+    request_timeout = REQUEST_TIMEOUT if exact else FAST_REQUEST_TIMEOUT
+    attempts = REQUEST_ATTEMPTS if exact else 1
     for variant in variants:
         for dictionary in dictionaries:
             try:
                 # 첫 항목이 한 글자 등의 필터에 걸려도 오판하지 않도록 한 묶음을 확인한다.
-                words, total = fetch_dictionary(dictionary, variant, 1, page_size, filters)
+                words, total = fetch_dictionary(
+                    dictionary,
+                    variant,
+                    1,
+                    page_size,
+                    filters,
+                    request_timeout=request_timeout,
+                    attempts=attempts,
+                )
                 if words:
                     # 필터를 통과한 항목이 확인되면 원 API의 시작 일치 결과 수를 표시한다.
                     total_count += total
@@ -478,13 +519,23 @@ def starting_total(dictionaries: list[str], query: str, filters: Filters) -> tup
     return total, list(dict.fromkeys(warnings))
 
 
-def analyse_words(dictionaries: list[str], candidates: list[dict], filters: Filters, dueum: bool, exact_counts: bool = True) -> tuple[list[dict], list[str]]:
+def analyse_words(
+    dictionaries: list[str],
+    candidates: list[dict],
+    filters: Filters,
+    dueum: bool,
+    exact_counts: bool = True,
+    fast_all_counts: bool = False,
+) -> tuple[list[dict], list[str]]:
     if not exact_counts:
-        uncertain_syllables = {
-            last_hangul_syllable(word["word"])
-            for word in candidates
-            if last_hangul_syllable(word["word"]) in RARE_FINALS
-        }
+        if fast_all_counts:
+            uncertain_syllables = {last_hangul_syllable(word["word"]) for word in candidates}
+        else:
+            uncertain_syllables = {
+                last_hangul_syllable(word["word"])
+                for word in candidates
+                if last_hangul_syllable(word["word"]) in RARE_FINALS
+            }
         counts: dict[str, tuple[int, list[str]]] = {}
         warnings = []
         if uncertain_syllables:
@@ -497,7 +548,9 @@ def analyse_words(dictionaries: list[str], candidates: list[dict], filters: Filt
             last = last_hangul_syllable(word["word"])
             count, notes = counts.get(last, (0 if last in RARE_FINALS else 1, []))
             warnings.extend(notes)
-            is_one_shot = last in RARE_FINALS and count == 0
+            if notes and fast_all_counts:
+                count = 999999999
+            is_one_shot = (last in RARE_FINALS or fast_all_counts) and count == 0 and not notes
             word.update(last_syllable=last, next_word_count=count, is_one_shot=is_one_shot,
                         dictionary="두 사전 공통" if len(word["dictionary_codes"]) == 2 else DICTIONARIES[word["dictionary_codes"][0]]["name"],
                         fast_judgement=True)
@@ -632,16 +685,22 @@ def search():
             warnings: list[str] = []
             if page == 1:
                 candidates: list[dict] = []
-                rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters)
-                warnings.extend(rare_warnings)
-                for word in rare_candidates:
-                    if not any(existing["word"] == word["word"] for existing in candidates):
-                        candidates.append(word)
                 expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
                 warnings.extend(expanded_warnings)
                 for word in expanded_candidates:
                     if not any(existing["word"] == word["word"] for existing in candidates):
                         candidates.append(word)
+                if not candidates:
+                    rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters)
+                    warnings.extend(rare_warnings)
+                    for word in rare_candidates:
+                        if not any(existing["word"] == word["word"] for existing in candidates):
+                            candidates.append(word)
+                    expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
+                    warnings.extend(expanded_warnings)
+                    for word in expanded_candidates:
+                        if not any(existing["word"] == word["word"] for existing in candidates):
+                            candidates.append(word)
                 if candidates:
                     raw_total, total_warnings = starting_total(dictionaries, query, filters)
                     warnings.extend(total_warnings)
@@ -657,14 +716,35 @@ def search():
             warnings.extend(notes)
             visible = order_words([word for word in analysed if word["is_one_shot"]], sort)[:PAGE_SIZE]
         elif broad_sort:
-            candidates, raw_total, warnings = merged_search(dictionaries, query, filters, SORT_CANDIDATES)
-            rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters)
-            warnings.extend(rare_warnings)
-            for word in rare_candidates:
-                if not any(existing["word"] == word["word"] for existing in candidates):
-                    candidates.append(word)
-            raw_total = max(raw_total, len(candidates))
-            analysed, notes = analyse_words(dictionaries, sorted(candidates, key=candidate_priority)[:ONE_SHOT_ANALYSIS_LIMIT], filters, dueum, exact_counts=False)
+            candidates, raw_total, warnings = paged_search(dictionaries, query, filters, page)
+            if sort == "one-shot":
+                expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
+                warnings.extend(expanded_warnings)
+                for word in expanded_candidates:
+                    if not any(existing["word"] == word["word"] for existing in candidates):
+                        candidates.append(word)
+                if not any(last_hangul_syllable(word["word"]) in RARE_FINALS for word in candidates):
+                    rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters)
+                    warnings.extend(rare_warnings)
+                    for word in rare_candidates:
+                        if not any(existing["word"] == word["word"] for existing in candidates):
+                            candidates.append(word)
+                    expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
+                    warnings.extend(expanded_warnings)
+                    for word in expanded_candidates:
+                        if not any(existing["word"] == word["word"] for existing in candidates):
+                            candidates.append(word)
+                raw_total = max(raw_total, len(candidates))
+            analysis_limit = NEXT_SORT_ANALYSIS_LIMIT if sort == "next" else ONE_SHOT_ANALYSIS_LIMIT
+            analysis_pool = candidates if sort == "next" else sorted(candidates, key=candidate_priority)
+            analysed, notes = analyse_words(
+                dictionaries,
+                analysis_pool[:analysis_limit],
+                filters,
+                dueum,
+                exact_counts=False,
+                fast_all_counts=(sort == "next"),
+            )
             warnings.extend(notes)
             ordered = order_words(analysed, sort)
             visible_pool = [word for word in ordered if mode != "one-shot" or word["is_one_shot"]]
@@ -673,10 +753,18 @@ def search():
             has_more = end < len(visible_pool)
         else:
             candidates, raw_total, warnings = paged_search(dictionaries, query, filters, page)
-            analysed, notes = analyse_words(dictionaries, candidates, filters, dueum, exact_counts=False)
+            analysed, notes = analyse_words(
+                dictionaries,
+                candidates,
+                filters,
+                dueum,
+                exact_counts=False,
+                fast_all_counts=(sort == "next"),
+            )
             warnings.extend(notes)
             visible = [w for w in order_words(analysed, sort) if mode != "one-shot" or w["is_one_shot"]]
             has_more = page * PAGE_SIZE < raw_total
+        visible = dedupe_exact_words(visible)
         one_shot_count = sum(word["is_one_shot"] for word in analysed)
         return jsonify(query=query, dictionary=request.args.get("dictionary", "stdict"), dictionary_name=" + ".join(DICTIONARIES[x]["name"] for x in dictionaries),
                        total=raw_total, api_total=raw_total, one_shot_count=one_shot_count,

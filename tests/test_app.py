@@ -36,6 +36,11 @@ class HelperTests(unittest.TestCase):
         filters = app.Filters(noun_only=True, include_technical=True)
         self.assertTrue(app.allowed(word, filters))
 
+    def test_no_part_of_speech_can_pass_noun_filter(self):
+        word = app.normalize_item({"word": "인산^나트륨", "pos": "품사 없음", "definition": "인산 나트륨."}, "stdict")
+        filters = app.Filters(noun_only=True, include_technical=True)
+        self.assertTrue(app.allowed(word, filters))
+
     def test_json_parser(self):
         words, total = app.parse_json(SAMPLE, "stdict")
         self.assertEqual(total, 1)
@@ -72,16 +77,55 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         count.assert_called_once()
 
+    def test_response_removes_exact_duplicate_words(self):
+        duplicate_a = app.normalize_item({"word": "인듐", "sense": {"pos": "명사", "definition": "은백색의 무른 금속 원소."}}, "stdict")
+        duplicate_b = app.normalize_item({"word": "인듐", "sense": {"pos": "명사", "definition": "은백색의 무른 금속 원소."}}, "stdict")
+        with patch.object(app, "rare_final_candidates", return_value=([duplicate_a, duplicate_b], [])), \
+             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
+             patch.object(app, "starting_total", return_value=(2, [])), \
+             patch.object(app, "continuation_count", return_value=(0, [])):
+            response = app.app.test_client().get("/api/search?query=인&dictionary=stdict&mode=one-shot&sort=alphabet")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([word["word"] for word in response.json["words"]], ["인듐"])
+
+    def test_next_sort_uses_fast_continuation_counts_for_all_syllables(self):
+        many = app.normalize_item({"word": "장가", "sense": {"pos": "명사"}}, "stdict")
+        few = app.normalize_item({"word": "장튬", "sense": {"pos": "명사"}}, "stdict")
+        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True):
+            return (0, []) if syllable == "튬" else (30, [])
+        with patch.object(app, "paged_search", return_value=([many, few], 2, [])), \
+             patch.object(app, "continuation_count", side_effect=count_for_syllable) as count:
+            response = app.app.test_client().get("/api/search?query=장&dictionary=stdict&mode=all&sort=next")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([word["word"] for word in response.json["words"]], ["장튬", "장가"])
+        self.assertTrue(count.call_count >= 2)
+        self.assertTrue(all(not call.args[4] for call in count.call_args_list))
+
     def test_one_shot_sort_uses_broader_candidate_pool(self):
         safe = app.normalize_item({"word": "가나", "sense": {"pos": "명사"}}, "stdict")
         shot = app.normalize_item({"word": "가슘", "sense": {"pos": "명사"}}, "stdict")
         def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True):
             return (0, []) if syllable == "슘" else (3, [])
-        with patch.object(app, "merged_search", return_value=([safe, shot], 2, [])), \
+        with patch.object(app, "paged_search", return_value=([safe, shot], 2, [])), \
+             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
              patch.object(app, "continuation_count", side_effect=count_for_syllable):
             response = app.app.test_client().get("/api/search?query=가&dictionary=stdict&mode=all&sort=one-shot")
         self.assertEqual(response.status_code, 200)
         self.assertEqual([word["word"] for word in response.json["words"]], ["가슘", "가나"])
+
+    def test_one_shot_sort_expands_hidden_rare_prefixes(self):
+        seed = app.normalize_item({"word": "인듐", "sense": {"pos": "명사"}}, "stdict")
+        sodium = app.normalize_item({"word": "인산나트륨", "pos": "품사 없음", "definition": "인산 나트륨."}, "stdict")
+        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True):
+            return (0, []) if syllable in {"듐", "륨"} else (5, [])
+        with patch.object(app, "paged_search", return_value=([], 2340, [])), \
+             patch.object(app, "rare_final_candidates", return_value=([seed], [])), \
+             patch.object(app, "prefix_expansion_candidates", return_value=([sodium], [])) as expand, \
+             patch.object(app, "continuation_count", side_effect=count_for_syllable):
+            response = app.app.test_client().get("/api/search?query=인&dictionary=stdict&mode=all&sort=one-shot&dueum=false")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("인산나트륨", [word["word"] for word in response.json["words"]])
+        expand.assert_called_once()
 
     def test_one_shot_mode_uses_broader_fast_search(self):
         shot = app.normalize_item({"word": "가슘", "sense": {"pos": "명사"}}, "stdict")
@@ -152,7 +196,7 @@ class HelperTests(unittest.TestCase):
     def test_prefix_expansion_finds_hidden_same_family_rare_word(self):
         seed = app.normalize_item({"word": "수산화카드뮴", "sense": {"pos": "품사 미상"}}, "opendict")
         sodium = app.normalize_item({"word": "수산화나트륨", "sense": {"pos": "품사 미상"}}, "opendict")
-        def fake_fetch(_dictionary, prefix, _start, _count, _filters, method="start"):
+        def fake_fetch(_dictionary, prefix, _start, _count, _filters, method="start", **_kwargs):
             if prefix == "수산화" and method == "start":
                 return [sodium], 1
             return [], 0
