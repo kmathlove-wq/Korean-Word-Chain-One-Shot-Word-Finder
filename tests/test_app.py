@@ -86,17 +86,20 @@ class HelperTests(unittest.TestCase):
     def test_one_shot_mode_uses_broader_fast_search(self):
         shot = app.normalize_item({"word": "가슘", "sense": {"pos": "명사"}}, "stdict")
         with patch.object(app, "paged_search") as paged, \
-             patch.object(app, "merged_search", return_value=([shot], 100, [])) as merged, \
+             patch.object(app, "merged_search") as merged, \
+             patch.object(app, "one_shot_scan_candidates", return_value=([shot], 100, False, [])) as scan, \
+             patch.object(app, "rare_final_candidates", return_value=([], [])), \
              patch.object(app, "continuation_count", return_value=(0, [])):
             response = app.app.test_client().get("/api/search?query=가&dictionary=stdict&mode=one-shot&sort=alphabet")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["words"][0]["word"], "가슘")
         paged.assert_not_called()
-        merged.assert_called_once()
+        merged.assert_not_called()
+        scan.assert_called_once()
 
     def test_one_shot_mode_uses_direct_rare_final_candidates(self):
         shot = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "opendict")
-        with patch.object(app, "merged_search", return_value=([], 2911, [])), \
+        with patch.object(app, "one_shot_scan_candidates", return_value=([], 2911, True, [])), \
              patch.object(app, "rare_final_candidates", return_value=([shot], [])) as rare, \
              patch.object(app, "continuation_count", return_value=(0, [])):
             response = app.app.test_client().get("/api/search?query=리&dictionary=opendict&mode=one-shot&sort=alphabet")
@@ -106,13 +109,57 @@ class HelperTests(unittest.TestCase):
 
     def test_one_shot_total_includes_direct_rare_candidates(self):
         shot = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
-        with patch.object(app, "merged_search", return_value=([], 0, [])), \
+        with patch.object(app, "one_shot_scan_candidates", return_value=([], 0, False, [])), \
              patch.object(app, "rare_final_candidates", return_value=([shot], [])), \
              patch.object(app, "continuation_count", return_value=(0, [])):
             response = app.app.test_client().get("/api/search?query=리&dictionary=stdict&mode=one-shot&sort=alphabet")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["total"], 1)
         self.assertEqual(response.json["one_shot_count"], 1)
+
+    def test_one_shot_mode_can_continue_after_empty_scan_window(self):
+        with patch.object(app, "one_shot_scan_candidates", return_value=([], 12651, True, [])), \
+             patch.object(app, "rare_final_candidates", return_value=([], [])):
+            response = app.app.test_client().get("/api/search?query=수&dictionary=opendict&mode=one-shot&sort=alphabet")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["words"], [])
+        self.assertTrue(response.json["has_more"])
+
+    def test_one_shot_mode_scans_requested_page_window(self):
+        shot = app.normalize_item({"word": "수산화나트륨", "sense": {"pos": "품사 미상"}}, "opendict")
+        with patch.object(app, "one_shot_scan_candidates", return_value=([shot], 12651, True, [])) as scan, \
+             patch.object(app, "rare_final_candidates") as rare, \
+             patch.object(app, "continuation_count", return_value=(0, [])):
+            response = app.app.test_client().get("/api/search?query=수&dictionary=opendict&mode=one-shot&sort=alphabet&page=2&noun_only=true&include_technical=true")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["words"][0]["word"], "수산화나트륨")
+        self.assertTrue(response.json["has_more"])
+        self.assertEqual(scan.call_args.args[3], 2)
+        rare.assert_not_called()
+
+    def test_one_shot_mode_expands_rare_candidate_prefixes(self):
+        seed = app.normalize_item({"word": "수산화카드뮴", "sense": {"pos": "품사 미상"}}, "opendict")
+        sodium = app.normalize_item({"word": "수산화나트륨", "sense": {"pos": "품사 미상"}}, "opendict")
+        with patch.object(app, "one_shot_scan_candidates", return_value=([seed], 12651, True, [])), \
+             patch.object(app, "rare_final_candidates", return_value=([], [])), \
+             patch.object(app, "prefix_expansion_candidates", return_value=([sodium], [])) as expand, \
+             patch.object(app, "continuation_count", return_value=(0, [])):
+            response = app.app.test_client().get("/api/search?query=수&dictionary=opendict&mode=one-shot&sort=alphabet&noun_only=true&include_technical=true&dueum=false")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("수산화나트륨", [word["word"] for word in response.json["words"]])
+        expand.assert_called_once()
+
+    def test_prefix_expansion_finds_hidden_same_family_rare_word(self):
+        seed = app.normalize_item({"word": "수산화카드뮴", "sense": {"pos": "품사 미상"}}, "opendict")
+        sodium = app.normalize_item({"word": "수산화나트륨", "sense": {"pos": "품사 미상"}}, "opendict")
+        def fake_fetch(_dictionary, prefix, _start, _count, _filters, method="start"):
+            if prefix == "수산화" and method == "start":
+                return [sodium], 1
+            return [], 0
+        with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
+            words, warnings = app.prefix_expansion_candidates(["opendict"], "수", [seed], app.Filters())
+        self.assertEqual(warnings, [])
+        self.assertEqual([word["word"] for word in words], ["수산화나트륨"])
 
     def test_rare_final_candidates_filters_to_matching_rare_endings(self):
         shot = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "opendict")

@@ -29,6 +29,10 @@ API_PAGE_SIZE = 100
 MAX_CANDIDATES = 300
 SORT_CANDIDATES = MAX_CANDIDATES
 MAX_API_SCAN = 1000
+ONE_SHOT_SCAN_WINDOW = 500
+PREFIX_EXPANSION_LIMIT = 6
+PREFIX_EXPANSION_PAGE_SIZE = 20
+PREFIX_EXPANSION_SCAN_LIMIT = 20
 RARE_PROBE_PAGE_SIZE = 100
 RARE_PROBE_DEEP_START = 1000
 RARE_PROBE_SHALLOW_START = 200
@@ -324,14 +328,6 @@ def rare_final_candidates(dictionaries: list[str], query: str, filters: Filters)
     """희귀 끝글자로 끝나는 단어를 역으로 찾아 한방 후보를 보강한다."""
     merged: dict[str, dict] = {}
     warnings = []
-    jobs: list[tuple[str, str, str, int]] = []
-    for dictionary in dictionaries:
-        for final in RARE_FINAL_PRIORITY:
-            max_start = RARE_PROBE_DEEP_START if final in DEEP_RARE_FINALS else RARE_PROBE_SHALLOW_START
-            jobs.extend((dictionary, final, "end", start) for start in range(1, max_start + 1, RARE_PROBE_PAGE_SIZE))
-        if last_hangul_syllable(query) in RARE_FINALS:
-            jobs.append((dictionary, query, "start", 1))
-        jobs.extend((dictionary, word, "start", 1) for word in sorted(KNOWN_RARE_WORD_PROBES) if word.startswith(query))
 
     def probe(job: tuple[str, str, str, int]) -> tuple[list[dict], list[str]]:
         dictionary, term, method, start = job
@@ -343,23 +339,110 @@ def rare_final_candidates(dictionaries: list[str], query: str, filters: Filters)
                 return [], []
             return [], [str(exc)]
 
-    with ThreadPoolExecutor(max_workers=min(8, max(1, len(jobs)))) as executor:
-        futures = [executor.submit(probe, job) for job in dict.fromkeys(jobs)]
-        for future in as_completed(futures):
-            words, notes = future.result()
-            warnings.extend(notes)
-            for word in words:
-                if not word["word"].startswith(query) or last_hangul_syllable(word["word"]) not in RARE_FINALS:
-                    continue
+    def collect(jobs: list[tuple[str, str, str, int]]) -> bool:
+        if not jobs:
+            return False
+        with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as executor:
+            futures = [executor.submit(probe, job) for job in dict.fromkeys(jobs)]
+            for future in as_completed(futures):
+                words, notes = future.result()
+                warnings.extend(notes)
+                for word in words:
+                    if not word["word"].startswith(query) or last_hangul_syllable(word["word"]) not in RARE_FINALS:
+                        continue
+                    current = merged.get(word["word"])
+                    if current:
+                        current["dictionary_codes"].extend(code for code in word["dictionary_codes"] if code not in current["dictionary_codes"])
+                    else:
+                        merged[word["word"]] = word
+                    if len(merged) >= RARE_CANDIDATE_LIMIT:
+                        return True
+        return bool(merged)
+
+    shallow_jobs: list[tuple[str, str, str, int]] = []
+    deep_jobs: list[tuple[str, str, str, int]] = []
+    for dictionary in dictionaries:
+        shallow_jobs.extend((dictionary, final, "end", 1) for final in RARE_FINAL_PRIORITY)
+        for final in RARE_FINAL_PRIORITY:
+            max_start = RARE_PROBE_DEEP_START if final in DEEP_RARE_FINALS else RARE_PROBE_SHALLOW_START
+            deep_jobs.extend((dictionary, final, "end", start) for start in range(1 + RARE_PROBE_PAGE_SIZE, max_start + 1, RARE_PROBE_PAGE_SIZE))
+        if last_hangul_syllable(query) in RARE_FINALS:
+            shallow_jobs.append((dictionary, query, "start", 1))
+        shallow_jobs.extend((dictionary, word, "start", 1) for word in sorted(KNOWN_RARE_WORD_PROBES) if word.startswith(query))
+
+    if not collect(shallow_jobs):
+        collect(deep_jobs)
+    return list(merged.values()), list(dict.fromkeys(warnings))
+
+
+def one_shot_scan_candidates(dictionaries: list[str], query: str, filters: Filters, page: int) -> tuple[list[dict], int, bool, list[str]]:
+    """한방단어 모드에서 시작 검색 결과를 구간별로 정밀 탐색한다."""
+    merged: dict[str, dict] = {}
+    total, warnings = 0, []
+    start_from = (page - 1) * ONE_SHOT_SCAN_WINDOW + 1
+    scan_until = page * ONE_SHOT_SCAN_WINDOW
+    for dictionary in dictionaries:
+        dictionary_total = 0
+        for api_start in range(start_from, scan_until + 1, API_PAGE_SIZE):
+            try:
+                batch, dictionary_total = fetch_dictionary(dictionary, query, api_start, API_PAGE_SIZE, filters)
+            except ApiError as exc:
+                if "Invalid start value" in str(exc):
+                    break
+                warnings.append(str(exc))
+                break
+            for word in batch:
                 current = merged.get(word["word"])
                 if current:
                     current["dictionary_codes"].extend(code for code in word["dictionary_codes"] if code not in current["dictionary_codes"])
                 else:
                     merged[word["word"]] = word
-                if len(merged) >= RARE_CANDIDATE_LIMIT:
-                    break
-            if len(merged) >= RARE_CANDIDATE_LIMIT:
+            if api_start + API_PAGE_SIZE > dictionary_total:
                 break
+        total += dictionary_total
+    if not merged and warnings:
+        raise ApiError(" ".join(warnings))
+    return list(merged.values()), total, scan_until < total, list(dict.fromkeys(warnings))
+
+
+def prefix_expansion_candidates(dictionaries: list[str], query: str, seeds: list[dict], filters: Filters) -> tuple[list[dict], list[str]]:
+    """이미 찾은 희귀 끝글자 후보의 앞부분으로 다시 좁혀 숨은 같은 계열 후보를 찾는다."""
+    prefixes: list[str] = []
+    for seed in sorted(seeds, key=lambda word: (len(word["word"]), word["word"])):
+        text = seed["word"]
+        if not text.startswith(query) or last_hangul_syllable(text) not in RARE_FINALS:
+            continue
+        size = len(query) + 2
+        if len(text) <= size:
+            continue
+        prefix = text[:size]
+        if prefix not in prefixes:
+            prefixes.append(prefix)
+        if len(prefixes) >= PREFIX_EXPANSION_LIMIT:
+            break
+
+    merged: dict[str, dict] = {}
+    warnings: list[str] = []
+    for prefix in prefixes:
+        for dictionary in dictionaries:
+            for api_start in range(1, PREFIX_EXPANSION_SCAN_LIMIT + 1, PREFIX_EXPANSION_PAGE_SIZE):
+                try:
+                    batch, total = fetch_dictionary(dictionary, prefix, api_start, PREFIX_EXPANSION_PAGE_SIZE, filters)
+                except ApiError as exc:
+                    if "Invalid start value" in str(exc):
+                        break
+                    warnings.append(str(exc))
+                    break
+                for word in batch:
+                    if not word["word"].startswith(query) or last_hangul_syllable(word["word"]) not in RARE_FINALS:
+                        continue
+                    current = merged.get(word["word"])
+                    if current:
+                        current["dictionary_codes"].extend(code for code in word["dictionary_codes"] if code not in current["dictionary_codes"])
+                    else:
+                        merged[word["word"]] = word
+                if api_start + PREFIX_EXPANSION_PAGE_SIZE > total:
+                    break
     return list(merged.values()), list(dict.fromkeys(warnings))
 
 
@@ -381,6 +464,18 @@ def continuation_count(dictionaries: list[str], syllable: str, filters: Filters,
             except ApiError as exc:
                 warnings.append(str(exc))
     return total_count, list(dict.fromkeys(warnings))
+
+
+def starting_total(dictionaries: list[str], query: str, filters: Filters) -> tuple[int, list[str]]:
+    """시작 검색의 전체 개수를 가볍게 조회한다."""
+    total, warnings = 0, []
+    for dictionary in dictionaries:
+        try:
+            _words, dictionary_total = fetch_dictionary(dictionary, query, 1, 1, filters)
+            total += dictionary_total
+        except ApiError as exc:
+            warnings.append(str(exc))
+    return total, list(dict.fromkeys(warnings))
 
 
 def analyse_words(dictionaries: list[str], candidates: list[dict], filters: Filters, dueum: bool, exact_counts: bool = True) -> tuple[list[dict], list[str]]:
@@ -528,7 +623,35 @@ def search():
         filters = Filters(**{name: as_bool(name) for name in Filters.__annotations__})
         dueum = as_bool("dueum", True)
         broad_sort = sort == "one-shot" or mode == "one-shot"
-        if broad_sort:
+        if mode == "one-shot":
+            warnings: list[str] = []
+            if page == 1:
+                candidates: list[dict] = []
+                rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters)
+                warnings.extend(rare_warnings)
+                for word in rare_candidates:
+                    if not any(existing["word"] == word["word"] for existing in candidates):
+                        candidates.append(word)
+                expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
+                warnings.extend(expanded_warnings)
+                for word in expanded_candidates:
+                    if not any(existing["word"] == word["word"] for existing in candidates):
+                        candidates.append(word)
+                if candidates:
+                    raw_total, total_warnings = starting_total(dictionaries, query, filters)
+                    warnings.extend(total_warnings)
+                    raw_total = max(raw_total, len(candidates))
+                    has_more = raw_total > ONE_SHOT_SCAN_WINDOW
+                else:
+                    candidates, raw_total, has_more, scan_warnings = one_shot_scan_candidates(dictionaries, query, filters, page)
+                    warnings.extend(scan_warnings)
+            else:
+                candidates, raw_total, has_more, scan_warnings = one_shot_scan_candidates(dictionaries, query, filters, page)
+                warnings.extend(scan_warnings)
+            analysed, notes = analyse_words(dictionaries, candidates, filters, dueum, exact_counts=False)
+            warnings.extend(notes)
+            visible = order_words([word for word in analysed if word["is_one_shot"]], sort)[:PAGE_SIZE]
+        elif broad_sort:
             candidates, raw_total, warnings = merged_search(dictionaries, query, filters, SORT_CANDIDATES)
             rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters)
             warnings.extend(rare_warnings)
@@ -536,17 +659,13 @@ def search():
                 if not any(existing["word"] == word["word"] for existing in candidates):
                     candidates.append(word)
             raw_total = max(raw_total, len(candidates))
-            if mode == "one-shot":
-                analysed, visible, has_more, notes = one_shot_page(dictionaries, candidates, filters, dueum, page)
-                warnings.extend(notes)
-            else:
-                analysed, notes = analyse_words(dictionaries, sorted(candidates, key=candidate_priority)[:ONE_SHOT_ANALYSIS_LIMIT], filters, dueum, exact_counts=False)
-                warnings.extend(notes)
-                ordered = order_words(analysed, sort)
-                visible_pool = [word for word in ordered if mode != "one-shot" or word["is_one_shot"]]
-                start, end = (page - 1) * PAGE_SIZE, page * PAGE_SIZE
-                visible = visible_pool[start:end]
-                has_more = end < len(visible_pool)
+            analysed, notes = analyse_words(dictionaries, sorted(candidates, key=candidate_priority)[:ONE_SHOT_ANALYSIS_LIMIT], filters, dueum, exact_counts=False)
+            warnings.extend(notes)
+            ordered = order_words(analysed, sort)
+            visible_pool = [word for word in ordered if mode != "one-shot" or word["is_one_shot"]]
+            start, end = (page - 1) * PAGE_SIZE, page * PAGE_SIZE
+            visible = visible_pool[start:end]
+            has_more = end < len(visible_pool)
         else:
             candidates, raw_total, warnings = paged_search(dictionaries, query, filters, page)
             analysed, notes = analyse_words(dictionaries, candidates, filters, dueum, exact_counts=False)
