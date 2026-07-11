@@ -53,6 +53,17 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertTrue(response.json["words"][0]["is_one_shot"])
 
+    def test_one_shot_sort_uses_broader_candidate_pool(self):
+        safe = app.normalize_item({"word": "가나", "sense": {"pos": "명사"}}, "stdict")
+        shot = app.normalize_item({"word": "가슘", "sense": {"pos": "명사"}}, "stdict")
+        def count_for_syllable(_dictionaries, syllable, _filters, _dueum):
+            return (0, []) if syllable == "슘" else (3, [])
+        with patch.object(app, "merged_search", return_value=([safe, shot], 2, [])), \
+             patch.object(app, "continuation_count", side_effect=count_for_syllable):
+            response = app.app.test_client().get("/api/search?query=가&dictionary=stdict&mode=all&sort=one-shot")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([word["word"] for word in response.json["words"]], ["가슘", "가나"])
+
     def test_continuation_is_not_one_shot_when_filtered_match_exists(self):
         match = app.normalize_item({"word": "가가", "sense": {"pos": "명사"}}, "stdict")
         with patch.object(app, "fetch_dictionary", return_value=([match], 4043)) as fetch:

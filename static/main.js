@@ -6,7 +6,7 @@ const results = document.querySelector('#results');
 const grid = document.querySelector('#word-grid');
 const moreButton = document.querySelector('#more-button');
 const sortSelect = document.querySelector('#sort-select');
-let state = { page: 1, words: [], hasMore: false, params: null, recentKeys: new Set() };
+let state = { page: 1, words: [], hasMore: false, params: null, recentKeys: new Set(), prefetch: null };
 
 const setHidden = (element, hidden) => { element.hidden = hidden; };
 const escapeHtml = (value = '') => String(value).replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
@@ -20,7 +20,7 @@ function showMessage(text, kind = 'error') {
 
 function buildParams(page = 1) {
   const data = new FormData(form);
-  const params = new URLSearchParams({query: data.get('query').trim(), dictionary: data.get('dictionary'), mode: data.get('mode'), page});
+  const params = new URLSearchParams({query: data.get('query').trim(), dictionary: data.get('dictionary'), mode: data.get('mode'), sort: sortSelect.value, page});
   ['noun_only','include_proper','include_north','include_dialect','include_old','include_technical','include_single','dueum'].forEach(name => params.set(name, data.has(name)));
   return params;
 }
@@ -63,6 +63,26 @@ function scrollToNewResults() {
   requestAnimationFrame(() => firstNewResult.scrollIntoView({behavior, block: 'start'}));
 }
 
+async function requestSearch(params) {
+  const response = await fetch(`/api/search?${params}`);
+  const data = await response.json();
+  if (!response.ok) throw new Error(data.error || '검색 중 오류가 발생했습니다.');
+  return data;
+}
+
+function prefetchNextPage() {
+  if (!state.hasMore || !state.params) return;
+  const params = new URLSearchParams(state.params);
+  params.set('page', state.page + 1);
+  const key = params.toString();
+  state.prefetch = {
+    key,
+    promise: requestSearch(params)
+      .then(data => ({data}))
+      .catch(error => ({error})),
+  };
+}
+
 async function search(page = 1, append = false) {
   const params = append ? new URLSearchParams(state.params) : buildParams(page);
   params.set('page', page);
@@ -71,21 +91,23 @@ async function search(page = 1, append = false) {
   setHidden(message, true); setHidden(loading, false); if (!append) setHidden(results, true);
   moreButton.disabled = true;
   try {
-    const response = await fetch(`/api/search?${params}`);
-    const data = await response.json();
-    if (!response.ok) throw new Error(data.error || '검색 중 오류가 발생했습니다.');
-    state = {page, words: append ? [...state.words, ...data.words] : data.words, hasMore: data.has_more, params: params.toString(), recentKeys: append ? new Set(data.words.map(wordKey)) : new Set()};
+    const key = params.toString();
+    const cached = append && state.prefetch?.key === key ? await state.prefetch.promise : null;
+    if (cached?.error) throw cached.error;
+    const data = cached?.data || await requestSearch(params);
+    state = {page, words: append ? [...state.words, ...data.words] : data.words, hasMore: data.has_more, params: key, recentKeys: append ? new Set(data.words.map(wordKey)) : new Set(), prefetch: null};
     render(data);
     if (append) scrollToNewResults();
     if (!data.words.length) showMessage('조건에 맞는 단어를 찾지 못했습니다. 필터를 바꿔 보세요.', 'notice');
     else if (data.warnings?.length) showMessage(`일부 결과 안내: ${data.warnings.join(' ')}`, 'notice');
+    prefetchNextPage();
   } catch (error) { showMessage(error.message); }
   finally { setHidden(loading, true); moreButton.disabled = false; }
 }
 
 form.addEventListener('submit', event => { event.preventDefault(); search(); });
-form.addEventListener('reset', () => setTimeout(() => { queryInput.value = ''; state = {page:1, words:[], hasMore:false, params:null, recentKeys:new Set()}; setHidden(results,true); setHidden(message,true); }, 0));
+form.addEventListener('reset', () => setTimeout(() => { queryInput.value = ''; state = {page:1, words:[], hasMore:false, params:null, recentKeys:new Set(), prefetch:null}; setHidden(results,true); setHidden(message,true); }, 0));
 document.querySelector('#clear-query').addEventListener('click', () => { queryInput.value = ''; queryInput.focus(); });
 moreButton.addEventListener('click', () => search(state.page + 1, true));
-sortSelect.addEventListener('change', () => { if (state.words.length) grid.innerHTML = sortedWords().map(card).join(''); });
+sortSelect.addEventListener('change', () => { if (state.words.length) search(); });
 grid.addEventListener('click', async event => { const button = event.target.closest('[data-copy]'); if (!button) return; try { await navigator.clipboard.writeText(button.dataset.copy); button.textContent = '복사됨'; setTimeout(() => button.textContent = '복사', 1200); } catch { showMessage('클립보드에 복사하지 못했습니다.'); } });

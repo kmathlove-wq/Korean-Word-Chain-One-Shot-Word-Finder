@@ -315,6 +315,38 @@ def continuation_count(dictionaries: list[str], syllable: str, filters: Filters,
     return total_count, list(dict.fromkeys(warnings))
 
 
+def analyse_words(dictionaries: list[str], candidates: list[dict], filters: Filters, dueum: bool) -> tuple[list[dict], list[str]]:
+    syllables = {last_hangul_syllable(word["word"]) for word in candidates}
+    counts: dict[str, tuple[int, list[str]]] = {}
+    warnings = []
+    # 서로 독립적인 끝 글자 조회를 병렬 처리해 순차 네트워크 대기를 없앤다.
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(syllables)))) as executor:
+        futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum): syllable for syllable in syllables}
+        for future in as_completed(futures):
+            counts[futures[future]] = future.result()
+    analysed = []
+    for word in candidates:
+        last = last_hangul_syllable(word["word"])
+        count, notes = counts.get(last, (0, []))
+        warnings.extend(notes)
+        word.update(last_syllable=last, next_word_count=count, is_one_shot=count == 0,
+                    dictionary="두 사전 공통" if len(word["dictionary_codes"]) == 2 else DICTIONARIES[word["dictionary_codes"][0]]["name"])
+        analysed.append(word)
+    return analysed, warnings
+
+
+def order_words(words: list[dict], sort: str) -> list[dict]:
+    if sort == "short":
+        return sorted(words, key=lambda word: (len(word["word"]), word["word"]))
+    if sort == "long":
+        return sorted(words, key=lambda word: (-len(word["word"]), word["word"]))
+    if sort == "next":
+        return sorted(words, key=lambda word: (word["next_word_count"], word["word"]))
+    if sort == "one-shot":
+        return sorted(words, key=lambda word: (not word["is_one_shot"], word["word"]))
+    return sorted(words, key=lambda word: word["word"])
+
+
 def paged_search(dictionaries: list[str], query: str, filters: Filters, page: int) -> tuple[list[dict], int, list[str]]:
     """화면에 필요한 한 페이지만 가져와 첫 응답 시간을 제한한다."""
     merged: dict[str, dict] = {}
@@ -362,30 +394,31 @@ def search():
         mode = request.args.get("mode", "all")
         if mode not in {"all", "words", "one-shot"}:
             raise ValueError("올바른 검색 유형을 선택해 주세요.")
+        sort = request.args.get("sort", "alphabet")
+        if sort not in {"alphabet", "short", "long", "next", "one-shot"}:
+            raise ValueError("올바른 정렬 기준을 선택해 주세요.")
         page = max(1, int(request.args.get("page", 1)))
         filters = Filters(**{name: as_bool(name) for name in Filters.__annotations__})
         dueum = as_bool("dueum", True)
-        candidates, raw_total, warnings = paged_search(dictionaries, query, filters, page)
-        syllables = {last_hangul_syllable(word["word"]) for word in candidates}
-        counts: dict[str, tuple[int, list[str]]] = {}
-        # 서로 독립적인 끝 글자 조회를 병렬 처리해 순차 네트워크 대기를 없앤다.
-        with ThreadPoolExecutor(max_workers=min(8, max(1, len(syllables)))) as executor:
-            futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum): syllable for syllable in syllables}
-            for future in as_completed(futures):
-                counts[futures[future]] = future.result()
-        analysed = []
-        for word in candidates:
-            last = last_hangul_syllable(word["word"])
-            count, notes = counts.get(last, (0, []))
+        if sort == "one-shot" or mode == "one-shot":
+            candidates, raw_total, warnings = merged_search(dictionaries, query, filters, MAX_CANDIDATES)
+            analysed, notes = analyse_words(dictionaries, candidates, filters, dueum)
             warnings.extend(notes)
-            word.update(last_syllable=last, next_word_count=count, is_one_shot=count == 0,
-                        dictionary="두 사전 공통" if len(word["dictionary_codes"]) == 2 else DICTIONARIES[word["dictionary_codes"][0]]["name"])
-            analysed.append(word)
+            ordered = order_words(analysed, sort)
+            visible_pool = [word for word in ordered if mode != "one-shot" or word["is_one_shot"]]
+            start, end = (page - 1) * PAGE_SIZE, page * PAGE_SIZE
+            visible = visible_pool[start:end]
+            has_more = end < len(visible_pool)
+        else:
+            candidates, raw_total, warnings = paged_search(dictionaries, query, filters, page)
+            analysed, notes = analyse_words(dictionaries, candidates, filters, dueum)
+            warnings.extend(notes)
+            visible = [w for w in order_words(analysed, sort) if mode != "one-shot" or w["is_one_shot"]]
+            has_more = page * PAGE_SIZE < raw_total
         one_shot_count = sum(word["is_one_shot"] for word in analysed)
-        visible = [w for w in analysed if mode != "one-shot" or w["is_one_shot"]]
         return jsonify(query=query, dictionary=request.args.get("dictionary", "stdict"), dictionary_name=" + ".join(DICTIONARIES[x]["name"] for x in dictionaries),
                        total=raw_total, api_total=raw_total, one_shot_count=one_shot_count,
-                       page=page, page_size=PAGE_SIZE, has_more=page * PAGE_SIZE < raw_total,
+                       page=page, page_size=PAGE_SIZE, has_more=has_more,
                        analysed_count=len(analysed), words=visible, warnings=list(dict.fromkeys(warnings)))
     except (ValueError, TypeError) as exc:
         return jsonify(error=str(exc)), 400
