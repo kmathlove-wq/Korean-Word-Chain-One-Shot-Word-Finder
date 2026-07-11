@@ -108,7 +108,8 @@ async function search(page = 1, append = false) {
     state = {page, words: append ? [...state.words, ...data.words] : data.words, hasMore: data.has_more, params: key, recentKeys: append ? new Set(data.words.map(wordKey)) : new Set(), prefetch: null};
     render(data);
     if (append) scrollToNewResults();
-    if (!data.words.length) showMessage('조건에 맞는 단어를 찾지 못했습니다. 필터를 바꿔 보세요.', 'notice');
+    if (!data.words.length && params.get('mode') === 'one-shot') showMessage('확인된 한방단어가 없습니다. 오류가 아니라, 선택한 사전과 필터 기준에서 이어갈 수 없는 단어를 찾지 못한 상태입니다.', 'notice');
+    else if (!data.words.length) showMessage('조건에 맞는 단어를 찾지 못했습니다. 필터를 바꿔 보세요.', 'notice');
     else if (data.warnings?.length) showMessage(`일부 결과 안내: ${data.warnings.join(' ')}`, 'notice');
     prefetchNextPage();
   } catch (error) { showMessage(error.message); }
