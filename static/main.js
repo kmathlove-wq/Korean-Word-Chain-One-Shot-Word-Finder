@@ -10,7 +10,15 @@ let state = { page: 1, words: [], hasMore: false, params: null, recentKeys: new 
 
 const setHidden = (element, hidden) => { element.hidden = hidden; };
 const escapeHtml = (value = '') => String(value).replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
-const wordKey = word => [word.word, word.dictionary, word.detail_url || '', word.definition].join('\u001f');
+const wordKey = word => word.word;
+
+function uniqueWords(words) {
+  const unique = new Map();
+  words.forEach(word => {
+    if (!unique.has(word.word)) unique.set(word.word, word);
+  });
+  return [...unique.values()];
+}
 
 function showMessage(text, kind = 'error') {
   message.textContent = text;
@@ -105,7 +113,9 @@ async function search(page = 1, append = false) {
     const cached = append && state.prefetch?.key === key ? await state.prefetch.promise : null;
     if (cached?.error) throw cached.error;
     const data = cached?.data || await requestSearch(params);
-    state = {page, words: append ? [...state.words, ...data.words] : data.words, hasMore: data.has_more, params: key, recentKeys: append ? new Set(data.words.map(wordKey)) : new Set(), prefetch: null};
+    const incomingWords = uniqueWords(data.words);
+    const nextWords = uniqueWords(append ? [...state.words, ...incomingWords] : incomingWords);
+    state = {page, words: nextWords, hasMore: data.has_more, params: key, recentKeys: append ? new Set(incomingWords.map(wordKey)) : new Set(), prefetch: null};
     render(data);
     if (append) scrollToNewResults();
     if (!data.words.length && params.get('mode') === 'one-shot' && data.has_more) showMessage('이번 탐색 구간에서는 한방단어를 찾지 못했습니다. 아래의 다음 결과 보기를 누르면 더 뒤쪽 단어까지 정밀 탐색합니다.', 'notice');
