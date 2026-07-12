@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>두음법칙 변환 보기</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css', v='49') }}">
+</head>
+<body class="dueum-page">
+  <main class="dueum-tool">
+    <p class="eyebrow">KOREAN INITIAL SOUND RULE</p>
+    <h1>두음법칙 변환 보기</h1>
+    <p>한글 단어나 음절을 입력하면 첫 음절에 적용되는 두음법칙 결과를 보여줍니다.</p>
+    <form method="get" action="{{ url_for('dueum_guide') }}">
+      <label for="dueum-word">변환할 단어</label>
+      <div class="dueum-input-row">
+        <input id="dueum-word" name="word" value="{{ word }}" maxlength="20" placeholder="예: 른" autofocus required>
+        <button type="submit">변환하기</button>
+      </div>
+    </form>
+    {% if error %}<p class="dueum-error">{{ error }}</p>{% endif %}
+    {% if converted %}
+      <section class="dueum-result" aria-live="polite">
+        <span>변환 결과</span>
+        <strong>{{ word }} → {{ converted }}</strong>
+        {% if word == converted %}<p>두음법칙으로 바뀌는 첫 음절이 없습니다.</p>{% endif %}
+      </section>
+    {% endif %}
+    <section class="dueum-rules" aria-labelledby="dueum-rules-title">
+      <h2 id="dueum-rules-title">간단한 두음법칙 규칙</h2>
+      <ol>
+        <li><strong>ㄴ + ㅑ·ㅕ·ㅖ·ㅛ·ㅠ·ㅣ → ㅇ</strong><span>녀→여, 뇨→요, 뉴→유, 니→이</span></li>
+        <li><strong>ㄹ + ㅑ·ㅕ·ㅖ·ㅛ·ㅠ·ㅣ → ㅇ</strong><span>랴→야, 려→여, 례→예, 료→요, 류→유, 리→이</span></li>
+        <li><strong>ㄹ + 그 밖의 모음 → ㄴ</strong><span>라→나, 래→내, 러→너, 레→네, 로→노, 루→누, 른→는</span></li>
+      </ol>
+      <p>이 도구는 입력한 단어의 첫 음절에 위 규칙을 적용합니다.</p>
+    </section>
+  </main>
+</body>
+</html>

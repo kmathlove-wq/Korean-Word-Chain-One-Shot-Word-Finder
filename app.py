@@ -134,6 +134,11 @@ def get_dueum_variants(syllable: str) -> list[str]:
     return list(dict.fromkeys([syllable, dueum_variant(syllable)]))
 
 
+def convert_dueum_word(word: str) -> str:
+    """단어 첫 음절에 두음법칙을 적용한 표기를 반환한다."""
+    return dueum_variant(word[0]) + word[1:] if word else word
+
+
 def last_hangul_syllable(word: str) -> str:
     matches = re.findall(r"[가-힣]", word or "")
     return matches[-1] if matches else ""
@@ -658,9 +663,38 @@ def paged_search(dictionaries: list[str], query: str, filters: Filters, page: in
     return list(merged.values()), total, warnings
 
 
+def paged_search_with_dueum(dictionaries: list[str], query: str, filters: Filters, page: int, dueum: bool) -> tuple[list[dict], int, list[str]]:
+    """한 음절 검색어는 원음과 두음 변환음의 시작 검색 결과를 합친다."""
+    queries = get_dueum_variants(query) if dueum and len(query) == 1 else [query]
+    merged: dict[str, dict] = {}
+    total = 0
+    warnings: list[str] = []
+    for search_query in queries:
+        words, query_total, notes = paged_search(dictionaries, search_query, filters, page)
+        total += query_total
+        warnings.extend(notes)
+        for word in words:
+            merge_word(merged, word)
+    return list(merged.values()), total, list(dict.fromkeys(warnings))
+
+
 @app.get("/")
 def index():
     return render_template("index.html")
+
+
+@app.get("/dueum")
+def dueum_guide():
+    word = (request.args.get("word") or "").strip()
+    converted = ""
+    error = ""
+    if word:
+        try:
+            word = validate_query(word)
+            converted = convert_dueum_word(word)
+        except ValueError as exc:
+            error = str(exc)
+    return render_template("dueum.html", word=word, converted=converted, error=error)
 
 
 @app.after_request
@@ -723,7 +757,7 @@ def search():
             warnings.extend(notes)
             visible = order_words([word for word in analysed if word["is_one_shot"]], sort)[:PAGE_SIZE]
         elif broad_sort:
-            candidates, raw_total, warnings = paged_search(dictionaries, query, filters, page)
+            candidates, raw_total, warnings = paged_search_with_dueum(dictionaries, query, filters, page, dueum)
             if sort == "one-shot" or (sort == "next" and page == 1):
                 rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters)
                 warnings.extend(rare_warnings)
@@ -759,7 +793,7 @@ def search():
                 visible = visible_pool[start:end]
                 has_more = end < len(visible_pool)
         else:
-            candidates, raw_total, warnings = paged_search(dictionaries, query, filters, page)
+            candidates, raw_total, warnings = paged_search_with_dueum(dictionaries, query, filters, page, dueum)
             analysed, notes = analyse_words(
                 dictionaries,
                 candidates,

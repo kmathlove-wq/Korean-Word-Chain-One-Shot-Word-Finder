@@ -28,6 +28,8 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(app.get_dueum_variants("린"), ["린", "인"])
         self.assertEqual(app.get_dueum_variants("륨"), ["륨", "윰"])
         self.assertEqual(app.get_dueum_variants("릎"), ["릎", "늪"])
+        self.assertEqual(app.get_dueum_variants("른"), ["른", "는"])
+        self.assertEqual(app.convert_dueum_word("른개"), "는개")
         self.assertEqual(app.get_dueum_variants("각"), ["각"])
         self.assertEqual(app.last_hangul_syllable("기쁨(1)-"), "쁨")
 
@@ -66,6 +68,24 @@ class HelperTests(unittest.TestCase):
         response = app.app.test_client().get("/api/health")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["status"], "ok")
+
+    def test_dueum_guide_shows_converted_word(self):
+        response = app.app.test_client().get("/dueum?word=른개")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("른개 → 는개", response.get_data(as_text=True))
+
+    def test_starting_search_merges_dueum_variant_results(self):
+        converted = app.normalize_item({"word": "는개", "sense": {"pos": "명사"}}, "stdict")
+
+        def fake_paged(_dictionaries, search_query, _filters, _page):
+            return ([converted], 92, []) if search_query == "는" else ([], 0, [])
+
+        with patch.object(app, "paged_search", side_effect=fake_paged) as paged, \
+             patch.object(app, "continuation_count", return_value=(5, [])):
+            response = app.app.test_client().get("/api/search?query=른&dictionary=stdict&mode=words&sort=alphabet&dueum=true")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([word["word"] for word in response.json["words"]], ["는개"])
+        self.assertEqual([call.args[1] for call in paged.call_args_list], ["른", "는"])
 
     def test_search_response(self):
         candidate = app.normalize_item(SAMPLE["channel"]["item"][0], "stdict")
