@@ -805,7 +805,8 @@ def search():
                 filters,
                 dueum,
                 exact_counts=False,
-                fast_all_counts=(sort == "next"),
+                # 일반 목록에서도 임시값 1이 아니라 마지막 글자별 API 수를 표시한다.
+                fast_all_counts=True,
             )
             warnings.extend(notes)
             visible = [w for w in order_words(analysed, sort) if mode != "one-shot" or w["is_one_shot"]]

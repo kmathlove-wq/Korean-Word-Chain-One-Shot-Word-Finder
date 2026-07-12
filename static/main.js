@@ -5,6 +5,7 @@ const loading = document.querySelector('#loading');
 const results = document.querySelector('#results');
 const grid = document.querySelector('#word-grid');
 const moreButton = document.querySelector('#more-button');
+const moreTopButton = document.querySelector('#more-top-button');
 const sortSelect = document.querySelector('#sort-select');
 let state = { page: 1, words: [], hasMore: false, params: null, recentKeys: new Set(), prefetch: null };
 
@@ -66,6 +67,7 @@ function render(data) {
   document.querySelector('#result-meta').textContent = `한방단어 ${data.one_shot_count}개 · 기준 사전: ${data.dictionary_name} · ${scope} ${data.analysed_count}개`;
   setHidden(results, false);
   setHidden(moreButton, !state.hasMore);
+  setHidden(moreTopButton, !state.hasMore);
 }
 
 function scrollToNewResults() {
@@ -111,6 +113,7 @@ async function search(page = 1, append = false) {
   if (!/^[가-힣]{1,20}$/.test(query)) { showMessage(query ? '완성된 한글을 20자 이하로 입력해 주세요.' : '검색할 한글 글자나 단어를 입력해 주세요.'); queryInput.focus(); return; }
   setHidden(message, true); setHidden(loading, false); if (!append) setHidden(results, true);
   moreButton.disabled = true;
+  moreTopButton.disabled = true;
   try {
     const key = params.toString();
     const cached = append && state.prefetch?.key === key ? await state.prefetch.promise : null;
@@ -129,12 +132,13 @@ async function search(page = 1, append = false) {
     else if (data.warnings?.length) showMessage(`일부 결과 안내: ${data.warnings.join(' ')}`, 'notice');
     prefetchNextPage();
   } catch (error) { showMessage(error.message); }
-  finally { setHidden(loading, true); moreButton.disabled = false; }
+  finally { setHidden(loading, true); moreButton.disabled = false; moreTopButton.disabled = false; }
 }
 
 form.addEventListener('submit', event => { event.preventDefault(); search(); });
 form.addEventListener('reset', () => setTimeout(() => { queryInput.value = ''; state = {page:1, words:[], hasMore:false, params:null, recentKeys:new Set(), prefetch:null}; setHidden(results,true); setHidden(message,true); }, 0));
 document.querySelector('#clear-query').addEventListener('click', () => { queryInput.value = ''; queryInput.focus(); });
 moreButton.addEventListener('click', () => search(state.page + 1, true));
+moreTopButton.addEventListener('click', () => search(state.page + 1, true));
 sortSelect.addEventListener('change', () => { if (state.words.length) search(); });
 grid.addEventListener('click', async event => { const button = event.target.closest('[data-copy]'); if (!button) return; try { await navigator.clipboard.writeText(button.dataset.copy); button.textContent = '복사됨'; setTimeout(() => button.textContent = '복사', 1200); } catch { showMessage('클립보드에 복사하지 못했습니다.'); } });

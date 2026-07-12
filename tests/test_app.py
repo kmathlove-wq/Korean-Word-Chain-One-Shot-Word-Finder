@@ -90,6 +90,7 @@ class HelperTests(unittest.TestCase):
             response = app.app.test_client().get("/api/search?query=른&dictionary=stdict&mode=words&sort=alphabet&dueum=true")
         self.assertEqual(response.status_code, 200)
         self.assertEqual([word["word"] for word in response.json["words"]], ["는개"])
+        self.assertEqual(response.json["words"][0]["next_word_count"], 5)
         self.assertEqual([call.args[1] for call in paged.call_args_list], ["른", "는"])
 
     def test_search_response(self):
