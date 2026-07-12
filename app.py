@@ -559,6 +559,13 @@ def analyse_words(
                 futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum, False): syllable for syllable in uncertain_syllables}
                 for future in as_completed(futures):
                     counts[futures[future]] = future.result()
+            # 짧은 제한 시간에 한 번 실패한 끝글자는 한 번 더 확인한다.
+            retry_syllables = [syllable for syllable, (_count, notes) in counts.items() if notes]
+            if retry_syllables:
+                with ThreadPoolExecutor(max_workers=min(4, len(retry_syllables))) as executor:
+                    futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum, False): syllable for syllable in retry_syllables}
+                    for future in as_completed(futures):
+                        counts[futures[future]] = future.result()
         analysed = []
         for word in candidates:
             last = last_hangul_syllable(word["word"])
@@ -569,7 +576,7 @@ def analyse_words(
             is_one_shot = (last in RARE_FINALS or fast_all_counts) and count == 0 and not notes
             word.update(last_syllable=last, next_word_count=count, is_one_shot=is_one_shot,
                         dictionary="두 사전 공통" if len(word["dictionary_codes"]) == 2 else DICTIONARIES[word["dictionary_codes"][0]]["name"],
-                        fast_judgement=True)
+                        fast_judgement=True, count_available=not notes)
             analysed.append(word)
         return analysed, list(dict.fromkeys(warnings))
     syllables = {last_hangul_syllable(word["word"]) for word in candidates}
@@ -649,7 +656,9 @@ def paged_search(dictionaries: list[str], query: str, filters: Filters, page: in
                         words[word["word"]] = word
                 api_start += 1
             selected = list(words.values())[(page - 1) * PAGE_SIZE:needed]
-            total += dictionary_total
+            scanned_all = not dictionary_total or (api_start - 1) * API_PAGE_SIZE >= dictionary_total
+            # 마지막 API 묶음까지 확인했다면 필터를 통과한 실제 개수를 사용한다.
+            total += len(words) if scanned_all else dictionary_total
             for word in selected:
                 current = merged.get(word["word"])
                 if current:

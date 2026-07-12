@@ -387,6 +387,28 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         self.assertEqual(fetch.call_count, 2)
 
+    def test_paged_search_uses_filtered_total_after_scanning_last_api_page(self):
+        allowed_words = [
+            app.normalize_item({"word": f"는개{index}", "sense": {"pos": "명사"}}, "stdict")
+            for index in range(28)
+        ]
+        with patch.object(app, "fetch_dictionary", return_value=(allowed_words, 92)):
+            first_words, first_total, _ = app.paged_search(["stdict"], "는", app.Filters(), 1)
+            second_words, second_total, _ = app.paged_search(["stdict"], "는", app.Filters(), 2)
+        self.assertEqual(len(first_words), 24)
+        self.assertEqual(len(second_words), 4)
+        self.assertEqual(first_total, 28)
+        self.assertEqual(second_total, 28)
+
+    def test_failed_fast_count_is_marked_unavailable_after_retry(self):
+        candidate = app.normalize_item({"word": "는개", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "continuation_count", return_value=(0, ["응답 지연"])) as count:
+            analysed, warnings = app.analyse_words(["stdict"], [candidate], app.Filters(), True, exact_counts=False, fast_all_counts=True)
+        self.assertEqual(count.call_count, 2)
+        self.assertFalse(analysed[0]["count_available"])
+        self.assertEqual(analysed[0]["next_word_count"], 999999999)
+        self.assertIn("응답 지연", warnings)
+
     def test_continuation_is_not_one_shot_when_filtered_match_exists(self):
         match = app.normalize_item({"word": "가가", "sense": {"pos": "명사"}}, "stdict")
         with patch.object(app, "fetch_dictionary", return_value=([match], 4043)) as fetch:
