@@ -70,9 +70,14 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(response.json["status"], "ok")
 
     def test_dueum_guide_shows_converted_word(self):
-        response = app.app.test_client().get("/dueum?word=른개")
+        response = app.app.test_client().get("/두음법칙 보기?word=른개")
         self.assertEqual(response.status_code, 200)
         self.assertIn("른개 → 는개", response.get_data(as_text=True))
+
+    def test_old_dueum_url_redirects_to_korean_address(self):
+        response = app.app.test_client().get("/dueum")
+        self.assertEqual(response.status_code, 301)
+        self.assertTrue(response.headers["Location"].endswith("/%EB%91%90%EC%9D%8C%EB%B2%95%EC%B9%99%20%EB%B3%B4%EA%B8%B0"))
 
     def test_starting_search_merges_dueum_variant_results(self):
         converted = app.normalize_item({"word": "는개", "sense": {"pos": "명사"}}, "stdict")

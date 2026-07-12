@@ -12,7 +12,7 @@ from typing import Any
 from urllib.parse import quote
 
 import requests
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, jsonify, redirect, render_template, request, url_for
 
 try:
     from dotenv import load_dotenv
@@ -684,6 +684,11 @@ def index():
 
 
 @app.get("/dueum")
+def dueum_legacy():
+    return redirect(url_for("dueum_guide"), code=301)
+
+
+@app.get("/두음법칙 보기")
 def dueum_guide():
     word = (request.args.get("word") or "").strip()
     converted = ""
