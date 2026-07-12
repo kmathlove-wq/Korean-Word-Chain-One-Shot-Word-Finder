@@ -123,6 +123,36 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(count.call_count >= 2)
         self.assertTrue(all(not call.args[4] for call in count.call_args_list))
 
+    def test_next_sort_has_more_uses_dictionary_total(self):
+        candidates = [
+            app.normalize_item({"word": f"리가{index}", "sense": {"pos": "명사"}}, "stdict")
+            for index in range(24)
+        ]
+        with patch.object(app, "paged_search", return_value=(candidates, 495, [])), \
+             patch.object(app, "rare_final_candidates", return_value=([], [])), \
+             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
+             patch.object(app, "continuation_count", return_value=(10, [])):
+            response = app.app.test_client().get("/api/search?query=리&dictionary=stdict&mode=all&sort=next&page=1")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json["words"]), 24)
+        self.assertTrue(response.json["has_more"])
+
+    def test_next_sort_second_page_returns_page_candidates_without_offsetting_twice(self):
+        candidates = [
+            app.normalize_item({"word": f"리나{index}", "sense": {"pos": "명사"}}, "stdict")
+            for index in range(24)
+        ]
+        with patch.object(app, "paged_search", return_value=(candidates, 495, [])), \
+             patch.object(app, "rare_final_candidates") as rare, \
+             patch.object(app, "prefix_expansion_candidates") as expand, \
+             patch.object(app, "continuation_count", return_value=(8, [])):
+            response = app.app.test_client().get("/api/search?query=리&dictionary=stdict&mode=all&sort=next&page=2")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.json["words"]), 24)
+        self.assertTrue(response.json["has_more"])
+        rare.assert_not_called()
+        expand.assert_not_called()
+
     def test_one_shot_sort_uses_broader_candidate_pool(self):
         safe = app.normalize_item({"word": "가나", "sense": {"pos": "명사"}}, "stdict")
         shot = app.normalize_item({"word": "가슘", "sense": {"pos": "명사"}}, "stdict")

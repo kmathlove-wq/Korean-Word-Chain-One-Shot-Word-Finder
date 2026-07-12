@@ -724,7 +724,7 @@ def search():
             visible = order_words([word for word in analysed if word["is_one_shot"]], sort)[:PAGE_SIZE]
         elif broad_sort:
             candidates, raw_total, warnings = paged_search(dictionaries, query, filters, page)
-            if sort in {"one-shot", "next"}:
+            if sort == "one-shot" or (sort == "next" and page == 1):
                 rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters)
                 warnings.extend(rare_warnings)
                 for word in rare_candidates:
@@ -749,9 +749,15 @@ def search():
             warnings.extend(notes)
             ordered = order_words(analysed, sort)
             visible_pool = [word for word in ordered if mode != "one-shot" or word["is_one_shot"]]
-            start, end = (page - 1) * PAGE_SIZE, page * PAGE_SIZE
-            visible = visible_pool[start:end]
-            has_more = end < len(visible_pool)
+            if sort == "next":
+                # paged_search가 이미 요청한 사전 페이지를 골랐으므로 다시
+                # page 오프셋을 적용하지 않는다. 다음 버튼은 API 전체 수로 판단한다.
+                visible = visible_pool[:PAGE_SIZE]
+                has_more = page * PAGE_SIZE < raw_total
+            else:
+                start, end = (page - 1) * PAGE_SIZE, page * PAGE_SIZE
+                visible = visible_pool[start:end]
+                has_more = end < len(visible_pool)
         else:
             candidates, raw_total, warnings = paged_search(dictionaries, query, filters, page)
             analysed, notes = analyse_words(
