@@ -46,6 +46,13 @@ class HelperTests(unittest.TestCase):
         filters = app.Filters(noun_only=True, include_technical=True)
         self.assertTrue(app.allowed(word, filters))
 
+    def test_word_chain_filters_reject_single_noun_and_verb(self):
+        filters = app.Filters(noun_only=True, include_technical=True, include_single=False)
+        single_noun = app.normalize_item({"word": "슛", "sense": {"pos": "명사"}}, "stdict")
+        verb = app.normalize_item({"word": "슛하다", "sense": {"pos": "동사"}}, "stdict")
+        self.assertFalse(app.allowed(single_noun, filters))
+        self.assertFalse(app.allowed(verb, filters))
+
     def test_json_parser(self):
         words, total = app.parse_json(SAMPLE, "stdict")
         self.assertEqual(total, 1)
@@ -281,6 +288,15 @@ class HelperTests(unittest.TestCase):
             words, warnings = app.rare_final_candidates(["opendict"], "수", app.Filters())
         self.assertEqual(warnings, [])
         self.assertEqual([word["word"] for word in words], ["수산마그네슘"])
+
+    def test_rare_final_candidates_finds_rebound_shot(self):
+        rebound = app.normalize_item({"word": "리바운드^슛", "sense": {"pos": "품사 없음"}}, "stdict")
+        def fake_fetch(_d, query, _s, _c, _f, method="start"):
+            return ([rebound], 1) if query == "슛" and method == "end" else ([], 0)
+        with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
+            words, warnings = app.rare_final_candidates(["stdict"], "리", app.Filters())
+        self.assertEqual(warnings, [])
+        self.assertEqual([word["word"] for word in words], ["리바운드슛"])
 
     def test_rare_final_candidates_scans_deeper_end_pages(self):
         sodium = app.normalize_item({"word": "수산화나트륨", "sense": {"pos": "명사"}}, "opendict")
