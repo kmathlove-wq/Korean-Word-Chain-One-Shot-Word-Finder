@@ -794,35 +794,39 @@ def search():
         dueum = as_bool("dueum", True)
         broad_sort = sort in {"one-shot", "next"} or mode == "one-shot"
         if mode == "one-shot":
-            warnings: list[str] = []
-            if page == 1:
-                candidates: list[dict] = []
-                # 한 접두 계열을 찾았더라도 다른 계열을 놓치지 않도록
-                # 희귀 끝글자 역검색 결과를 항상 합친다(예: 무수…륨 + 무릎).
-                rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters, deep=False)
+            # 현재 화면 후보는 끝글자 종류와 무관하게 모두 후속 단어를
+            # 확인한다. 고정 희귀 목록에 없는 '녘' 같은 한방 끝글자도 이
+            # 경로에서 빠지지 않는다.
+            candidates, raw_total, warnings = paged_search_with_dueum(
+                dictionaries, query, filters, page, dueum,
+            )
+            if page == 1 and raw_total > PAGE_SIZE:
+                # 결과가 한 화면보다 많을 때만 얕은 역검색으로 뒤쪽의 희귀
+                # 후보를 보강한다. 작은 검색은 불필요한 API 호출을 하지 않는다.
+                rare_candidates, rare_warnings = rare_final_candidates(
+                    dictionaries, query, filters, deep=False,
+                )
                 warnings.extend(rare_warnings)
                 for word in rare_candidates:
                     if not any(existing["word"] == word["word"] for existing in candidates):
                         candidates.append(word)
-                if candidates:
-                    raw_total, total_warnings = starting_total(dictionaries, query, filters)
-                    warnings.extend(total_warnings)
-                    has_more = raw_total > ONE_SHOT_SCAN_WINDOW * API_PAGE_SIZE
-                else:
-                    candidates, raw_total, has_more, scan_warnings = one_shot_scan_candidates(dictionaries, query, filters, page)
-                    warnings.extend(scan_warnings)
                 expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
                 warnings.extend(expanded_warnings)
                 for word in expanded_candidates:
                     if not any(existing["word"] == word["word"] for existing in candidates):
                         candidates.append(word)
                 raw_total = max(raw_total, len(candidates))
-            else:
-                candidates, raw_total, has_more, scan_warnings = one_shot_scan_candidates(dictionaries, query, filters, page)
-                warnings.extend(scan_warnings)
-            analysed, notes = analyse_words(dictionaries, candidates, filters, dueum, exact_counts=False)
+            analysed, notes = analyse_words(
+                dictionaries,
+                sorted(candidates, key=candidate_priority),
+                filters,
+                dueum,
+                exact_counts=False,
+                fast_all_counts=True,
+            )
             warnings.extend(notes)
             visible = order_words([word for word in analysed if word["is_one_shot"]], sort)[:PAGE_SIZE]
+            has_more = len([word for word in analysed if word["is_one_shot"]]) > PAGE_SIZE or page * PAGE_SIZE < raw_total
         elif broad_sort:
             candidates, raw_total, warnings = paged_search_with_dueum(dictionaries, query, filters, page, dueum)
             if sort == "one-shot" or (sort == "next" and page == 1):
