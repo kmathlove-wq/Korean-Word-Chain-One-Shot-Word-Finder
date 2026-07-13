@@ -42,6 +42,7 @@ ONE_SHOT_ANALYSIS_LIMIT = 80
 NEXT_SORT_ANALYSIS_LIMIT = PAGE_SIZE * 2
 FAST_CONTINUATION_PAGE_SIZE = API_PAGE_SIZE
 FAST_REQUEST_TIMEOUT = (2, 3)
+SCAN_REQUEST_TIMEOUT = (4, 8)
 MAX_QUERY_LENGTH = 20
 CACHE_TTL = 60 * 30
 REQUEST_TIMEOUT = (10, 20)
@@ -433,21 +434,36 @@ def one_shot_scan_candidates(dictionaries: list[str], query: str, filters: Filte
     total, warnings = 0, []
     start_from = (page - 1) * ONE_SHOT_SCAN_WINDOW + 1
     scan_until = page * ONE_SHOT_SCAN_WINDOW
-    for dictionary in dictionaries:
-        dictionary_total = 0
-        for api_start in range(start_from, scan_until + 1):
-            try:
-                batch, dictionary_total = fetch_dictionary(dictionary, query, api_start, API_PAGE_SIZE, filters)
-            except ApiError as exc:
-                if "Invalid start value" in str(exc):
-                    break
-                warnings.append(str(exc))
-                break
+
+    def probe(job: tuple[str, int]) -> tuple[str, int, list[dict], int, list[str]]:
+        dictionary, api_start = job
+        try:
+            batch, dictionary_total = fetch_dictionary(
+                dictionary,
+                query,
+                api_start,
+                API_PAGE_SIZE,
+                filters,
+                request_timeout=SCAN_REQUEST_TIMEOUT,
+                attempts=1,
+            )
+            return dictionary, api_start, batch, dictionary_total, []
+        except ApiError as exc:
+            if "Invalid start value" in str(exc):
+                return dictionary, api_start, [], 0, []
+            return dictionary, api_start, [], 0, [str(exc)]
+
+    jobs = [(dictionary, api_start) for dictionary in dictionaries for api_start in range(start_from, scan_until + 1)]
+    totals: dict[str, int] = {dictionary: 0 for dictionary in dictionaries}
+    with ThreadPoolExecutor(max_workers=min(8, max(1, len(jobs)))) as executor:
+        futures = [executor.submit(probe, job) for job in jobs]
+        for future in as_completed(futures):
+            dictionary, _api_start, batch, dictionary_total, notes = future.result()
+            totals[dictionary] = max(totals[dictionary], dictionary_total)
+            warnings.extend(notes)
             for word in batch:
                 merge_word(merged, word)
-            if api_start * API_PAGE_SIZE >= dictionary_total:
-                break
-        total += dictionary_total
+    total = sum(totals.values())
     if not merged and warnings:
         raise ApiError(" ".join(warnings))
     return list(merged.values()), total, scan_until * API_PAGE_SIZE < total, list(dict.fromkeys(warnings))
@@ -456,7 +472,11 @@ def one_shot_scan_candidates(dictionaries: list[str], query: str, filters: Filte
 def prefix_expansion_candidates(dictionaries: list[str], query: str, seeds: list[dict], filters: Filters) -> tuple[list[dict], list[str]]:
     """이미 찾은 희귀 끝글자 후보의 앞부분으로 다시 좁혀 숨은 같은 계열 후보를 찾는다."""
     prefixes: list[str] = []
-    if len(query) == 1:
+    has_rare_seed = any(
+        word["word"].startswith(query) and last_hangul_syllable(word["word"]) in RARE_FINALS
+        for word in seeds
+    )
+    if len(query) == 1 and has_rare_seed:
         for suffix in PREFIX_PROBE_SUFFIXES:
             prefixes.append(query + suffix)
     for seed in sorted(seeds, key=lambda word: (len(word["word"]), word["word"])):
@@ -779,24 +799,24 @@ def search():
                 candidates: list[dict] = []
                 # 한 접두 계열을 찾았더라도 다른 계열을 놓치지 않도록
                 # 희귀 끝글자 역검색 결과를 항상 합친다(예: 무수…륨 + 무릎).
-                rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters)
+                rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters, deep=False)
                 warnings.extend(rare_warnings)
                 for word in rare_candidates:
-                    if not any(existing["word"] == word["word"] for existing in candidates):
-                        candidates.append(word)
-                expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
-                warnings.extend(expanded_warnings)
-                for word in expanded_candidates:
                     if not any(existing["word"] == word["word"] for existing in candidates):
                         candidates.append(word)
                 if candidates:
                     raw_total, total_warnings = starting_total(dictionaries, query, filters)
                     warnings.extend(total_warnings)
-                    raw_total = max(raw_total, len(candidates))
                     has_more = raw_total > ONE_SHOT_SCAN_WINDOW * API_PAGE_SIZE
                 else:
                     candidates, raw_total, has_more, scan_warnings = one_shot_scan_candidates(dictionaries, query, filters, page)
                     warnings.extend(scan_warnings)
+                expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
+                warnings.extend(expanded_warnings)
+                for word in expanded_candidates:
+                    if not any(existing["word"] == word["word"] for existing in candidates):
+                        candidates.append(word)
+                raw_total = max(raw_total, len(candidates))
             else:
                 candidates, raw_total, has_more, scan_warnings = one_shot_scan_candidates(dictionaries, query, filters, page)
                 warnings.extend(scan_warnings)

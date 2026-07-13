@@ -259,6 +259,34 @@ class HelperTests(unittest.TestCase):
         merged.assert_not_called()
         scan.assert_called_once()
 
+    def test_one_shot_scan_collects_parallel_page_results(self):
+        first = app.normalize_item({"word": "표가", "sense": {"pos": "명사"}}, "opendict")
+        fifth = app.normalize_item({"word": "표튬", "sense": {"pos": "명사"}}, "opendict")
+
+        def fake_fetch(_dictionary, _query, start, _count, _filters, **_kwargs):
+            if start == 1:
+                return [first], 714
+            if start == 5:
+                return [fifth], 714
+            return [], 714
+
+        with patch.object(app, "fetch_dictionary", side_effect=fake_fetch) as fetch:
+            words, total, has_more, warnings = app.one_shot_scan_candidates(["opendict"], "표", app.Filters(), 1)
+        self.assertEqual(sorted(word["word"] for word in words), ["표가", "표튬"])
+        self.assertEqual(total, 714)
+        self.assertTrue(has_more)
+        self.assertEqual(warnings, [])
+        self.assertEqual(fetch.call_count, app.ONE_SHOT_SCAN_WINDOW)
+        self.assertTrue(all(call.kwargs["attempts"] == 1 for call in fetch.call_args_list))
+
+    def test_prefix_expansion_skips_generic_probes_without_rare_seed(self):
+        common = app.normalize_item({"word": "표가", "sense": {"pos": "명사"}}, "opendict")
+        with patch.object(app, "fetch_dictionary") as fetch:
+            words, warnings = app.prefix_expansion_candidates(["opendict"], "표", [common], app.Filters())
+        self.assertEqual(words, [])
+        self.assertEqual(warnings, [])
+        fetch.assert_not_called()
+
     def test_one_shot_mode_uses_direct_rare_final_candidates(self):
         shot = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "opendict")
         with patch.object(app, "one_shot_scan_candidates", return_value=([], 2911, True, [])), \
