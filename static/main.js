@@ -78,14 +78,24 @@ function scrollToNewResults() {
   return true;
 }
 
-async function requestSearch(params) {
+const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+async function requestSearch(params, attempt = 1) {
   const response = await fetch(`/api/search?${params}`, {cache: 'no-store'});
   const text = await response.text();
   let data = null;
   try {
     data = text ? JSON.parse(text) : null;
   } catch {
+    if (attempt < 2) {
+      await wait(700);
+      return requestSearch(params, attempt + 1);
+    }
     throw new Error('서버 응답을 읽지 못했습니다. 잠시 후 다시 시도해 주세요.');
+  }
+  if ([500, 502, 503, 504].includes(response.status) && attempt < 2) {
+    await wait(700);
+    return requestSearch(params, attempt + 1);
   }
   if (!response.ok) throw new Error(data?.error || '검색 중 오류가 발생했습니다.');
   if (!data) throw new Error('서버 응답이 비어 있습니다. 잠시 후 다시 시도해 주세요.');

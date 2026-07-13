@@ -362,7 +362,12 @@ def merged_search(dictionaries: list[str], query: str, filters: Filters, limit: 
     return list(merged.values())[:limit], totals, warnings
 
 
-def rare_final_candidates(dictionaries: list[str], query: str, filters: Filters) -> tuple[list[dict], list[str]]:
+def rare_final_candidates(
+    dictionaries: list[str],
+    query: str,
+    filters: Filters,
+    deep: bool = True,
+) -> tuple[list[dict], list[str]]:
     """희귀 끝글자로 끝나는 단어를 역으로 찾아 한방 후보를 보강한다."""
     merged: dict[str, dict] = {}
     warnings = []
@@ -370,7 +375,18 @@ def rare_final_candidates(dictionaries: list[str], query: str, filters: Filters)
     def probe(job: tuple[str, str, str, int]) -> tuple[list[dict], list[str]]:
         dictionary, term, method, start = job
         try:
-            words, _total = fetch_dictionary(dictionary, term, start, RARE_PROBE_PAGE_SIZE, filters, method)
+            # 보조 후보 탐색 하나가 느려져 전체 웹 요청이 Render 제한 시간을
+            # 넘기지 않도록 짧은 조회로만 시도한다. 실패는 경고로 남긴다.
+            words, _total = fetch_dictionary(
+                dictionary,
+                term,
+                start,
+                RARE_PROBE_PAGE_SIZE,
+                filters,
+                method,
+                request_timeout=FAST_REQUEST_TIMEOUT,
+                attempts=1,
+            )
             return words, []
         except ApiError as exc:
             if "Invalid start value" in str(exc):
@@ -404,8 +420,10 @@ def rare_final_candidates(dictionaries: list[str], query: str, filters: Filters)
             shallow_jobs.append((dictionary, query, "start", 1))
         shallow_jobs.extend((dictionary, word, "start", 1) for word in sorted(KNOWN_RARE_WORD_PROBES) if word.startswith(query))
 
-    if not collect(shallow_jobs):
+    if deep and not collect(shallow_jobs):
         collect(deep_jobs)
+    elif not deep:
+        collect(shallow_jobs)
     return list(merged.values()), list(dict.fromkeys(warnings))
 
 
@@ -555,28 +573,39 @@ def analyse_words(
         counts: dict[str, tuple[int, list[str]]] = {}
         warnings = []
         if uncertain_syllables:
-            with ThreadPoolExecutor(max_workers=min(4, len(uncertain_syllables))) as executor:
+            with ThreadPoolExecutor(max_workers=min(8, len(uncertain_syllables))) as executor:
                 futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum, False): syllable for syllable in uncertain_syllables}
                 for future in as_completed(futures):
-                    counts[futures[future]] = future.result()
-            # 짧은 제한 시간에 한 번 실패한 끝글자는 한 번 더 확인한다.
-            retry_syllables = [syllable for syllable, (_count, notes) in counts.items() if notes]
+                    syllable = futures[future]
+                    try:
+                        counts[syllable] = future.result()
+                    except Exception:
+                        counts[syllable] = (0, [f"'{syllable}' 이어갈 단어 수를 확인하지 못했습니다."])
+            # 짧은 제한 시간에 실패한 끝글자는 일부를 한 번 더 병렬 확인한다.
+            # 지연 중인 공식 API를 모두 반복 호출하면 성공 수는 늘지 않으면서
+            # 운영 서버 제한 시간에 가까워지므로 한 요청당 8개로 제한한다.
+            retry_syllables = [syllable for syllable, (_count, notes) in counts.items() if notes][:8]
             if retry_syllables:
-                with ThreadPoolExecutor(max_workers=min(4, len(retry_syllables))) as executor:
+                with ThreadPoolExecutor(max_workers=min(8, len(retry_syllables))) as executor:
                     futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum, False): syllable for syllable in retry_syllables}
                     for future in as_completed(futures):
-                        counts[futures[future]] = future.result()
+                        syllable = futures[future]
+                        try:
+                            counts[syllable] = future.result()
+                        except Exception:
+                            counts[syllable] = (0, [f"'{syllable}' 이어갈 단어 수를 확인하지 못했습니다."])
         analysed = []
         for word in candidates:
             last = last_hangul_syllable(word["word"])
-            count, notes = counts.get(last, (0 if last in RARE_FINALS else 1, []))
+            checked = last in counts
+            count, notes = counts.get(last, (0 if last in RARE_FINALS else 999999999, []))
             warnings.extend(notes)
             if notes and fast_all_counts:
                 count = 999999999
             is_one_shot = (last in RARE_FINALS or fast_all_counts) and count == 0 and not notes
             word.update(last_syllable=last, next_word_count=count, is_one_shot=is_one_shot,
                         dictionary="두 사전 공통" if len(word["dictionary_codes"]) == 2 else DICTIONARIES[word["dictionary_codes"][0]]["name"],
-                        fast_judgement=True, count_available=not notes)
+                        fast_judgement=True, count_available=checked and not notes)
             analysed.append(word)
         return analysed, list(dict.fromkeys(warnings))
     syllables = {last_hangul_syllable(word["word"]) for word in candidates}
@@ -587,7 +616,11 @@ def analyse_words(
     with ThreadPoolExecutor(max_workers=min(worker_limit, max(1, len(syllables)))) as executor:
         futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum, exact_counts): syllable for syllable in syllables}
         for future in as_completed(futures):
-            counts[futures[future]] = future.result()
+            syllable = futures[future]
+            try:
+                counts[syllable] = future.result()
+            except Exception:
+                counts[syllable] = (0, [f"'{syllable}' 이어갈 단어 수를 확인하지 못했습니다."])
     analysed = []
     for word in candidates:
         last = last_hangul_syllable(word["word"])
@@ -773,7 +806,15 @@ def search():
         elif broad_sort:
             candidates, raw_total, warnings = paged_search_with_dueum(dictionaries, query, filters, page, dueum)
             if sort == "one-shot" or (sort == "next" and page == 1):
-                rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters)
+                # 정렬 요청에서는 운영 서버 제한 시간을 넘기는 역검색 심층
+                # 페이지까지 한 번에 훑지 않는다. 일반 시작 결과와 얕은 희귀
+                # 후보를 먼저 보여 주고, 다음 요청은 캐시를 재사용한다.
+                rare_candidates, rare_warnings = rare_final_candidates(
+                    dictionaries,
+                    query,
+                    filters,
+                    deep=(sort != "one-shot"),
+                )
                 warnings.extend(rare_warnings)
                 for word in rare_candidates:
                     if not any(existing["word"] == word["word"] for existing in candidates):
@@ -786,7 +827,7 @@ def search():
                 raw_total = max(raw_total, len(candidates))
             analysis_limit = len(candidates) if sort == "next" else ONE_SHOT_ANALYSIS_LIMIT
             analysis_pool = sorted(candidates, key=candidate_priority)
-            analysed, notes = analyse_words(
+            preliminary, notes = analyse_words(
                 dictionaries,
                 analysis_pool[:analysis_limit],
                 filters,
@@ -795,7 +836,8 @@ def search():
                 fast_all_counts=(sort == "next"),
             )
             warnings.extend(notes)
-            ordered = order_words(analysed, sort)
+            analysed = preliminary
+            ordered = order_words(preliminary, sort)
             visible_pool = [word for word in ordered if mode != "one-shot" or word["is_one_shot"]]
             if sort == "next":
                 # paged_search가 이미 요청한 사전 페이지를 골랐으므로 다시
@@ -803,9 +845,21 @@ def search():
                 visible = visible_pool[:PAGE_SIZE]
                 has_more = page * PAGE_SIZE < raw_total
             else:
-                start, end = (page - 1) * PAGE_SIZE, page * PAGE_SIZE
-                visible = visible_pool[start:end]
-                has_more = end < len(visible_pool)
+                # paged_search가 이미 현재 사전 페이지를 선택했다. 화면에
+                # 실제로 올릴 카드만 다시 확인해 일반 끝글자의 임시값 1을
+                # 실제 후속 단어 수로 교체한다.
+                visible_candidates = visible_pool[:PAGE_SIZE]
+                analysed, count_notes = analyse_words(
+                    dictionaries,
+                    visible_candidates,
+                    filters,
+                    dueum,
+                    exact_counts=False,
+                    fast_all_counts=True,
+                )
+                warnings.extend(count_notes)
+                visible = order_words(analysed, sort)
+                has_more = len(visible_pool) > PAGE_SIZE or page * PAGE_SIZE < raw_total
         else:
             candidates, raw_total, warnings = paged_search_with_dueum(dictionaries, query, filters, page, dueum)
             analysed, notes = analyse_words(
@@ -830,6 +884,10 @@ def search():
         return jsonify(error=str(exc)), 400
     except ApiError as exc:
         return jsonify(error=str(exc)), 502
+    except Exception:
+        # 예기치 않은 오류에도 HTML 오류 문서 대신 프런트가 읽을 수 있는
+        # JSON 계약을 유지한다. 내부 예외나 요청 정보는 응답에 노출하지 않는다.
+        return jsonify(error="검색 처리 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."), 500
 
 
 if __name__ == "__main__":

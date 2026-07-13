@@ -197,6 +197,39 @@ class HelperTests(unittest.TestCase):
             response = app.app.test_client().get("/api/search?query=가&dictionary=stdict&mode=all&sort=one-shot")
         self.assertEqual(response.status_code, 200)
         self.assertEqual([word["word"] for word in response.json["words"]], ["가슘", "가나"])
+        self.assertEqual(response.json["words"][1]["next_word_count"], 3)
+
+    def test_one_shot_sort_checks_common_endings_instead_of_using_placeholder_one(self):
+        common = app.normalize_item({"word": "표가", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "paged_search", return_value=([common], 1, [])), \
+             patch.object(app, "rare_final_candidates", return_value=([], [])), \
+             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
+             patch.object(app, "continuation_count", return_value=(4043, [])) as count:
+            response = app.app.test_client().get("/api/search?query=표&dictionary=stdict&mode=all&sort=one-shot")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["words"][0]["next_word_count"], 4043)
+        self.assertFalse(response.json["words"][0]["is_one_shot"])
+        count.assert_called_once()
+
+    def test_unchecked_common_ending_is_not_reported_as_one(self):
+        common = app.normalize_item({"word": "표가", "sense": {"pos": "명사"}}, "stdict")
+        analysed, warnings = app.analyse_words(
+            ["stdict"], [common], app.Filters(), True, exact_counts=False, fast_all_counts=False,
+        )
+        self.assertEqual(warnings, [])
+        self.assertFalse(analysed[0]["count_available"])
+        self.assertNotEqual(analysed[0]["next_word_count"], 1)
+
+    def test_unexpected_analysis_failure_keeps_json_response_contract(self):
+        candidate = app.normalize_item({"word": "표가", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "paged_search", return_value=([candidate], 1, [])), \
+             patch.object(app, "rare_final_candidates", return_value=([], [])), \
+             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
+             patch.object(app, "analyse_words", side_effect=RuntimeError("internal")):
+            response = app.app.test_client().get("/api/search?query=표&dictionary=stdict&mode=all&sort=one-shot")
+        self.assertEqual(response.status_code, 500)
+        self.assertTrue(response.is_json)
+        self.assertIn("일시적인 오류", response.json["error"])
 
     def test_one_shot_sort_expands_hidden_rare_prefixes(self):
         seed = app.normalize_item({"word": "인듐", "sense": {"pos": "명사"}}, "stdict")
@@ -294,7 +327,7 @@ class HelperTests(unittest.TestCase):
         shot = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "opendict")
         linoleum = app.normalize_item({"word": "리놀륨", "sense": {"pos": "명사"}}, "opendict")
         safe = app.normalize_item({"word": "리튬이온", "sense": {"pos": "명사"}}, "opendict")
-        def fake_fetch(_d, query, _s, _c, _f, method="start"):
+        def fake_fetch(_d, query, _s, _c, _f, method="start", **_kwargs):
             if query == "튬" and method == "end":
                 return [shot, safe], 2
             if query == "륨" and method == "end":
@@ -308,7 +341,7 @@ class HelperTests(unittest.TestCase):
     def test_rare_final_candidates_finds_middle_syllable_words(self):
         magnesium = app.normalize_item({"word": "수산마그네슘", "sense": {"pos": "명사"}}, "opendict")
         other = app.normalize_item({"word": "마그네슘", "sense": {"pos": "명사"}}, "opendict")
-        def fake_fetch(_d, query, _s, _c, _f, method="start"):
+        def fake_fetch(_d, query, _s, _c, _f, method="start", **_kwargs):
             return ([magnesium, other], 2) if query == "슘" and method == "end" else ([], 0)
         with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
             words, warnings = app.rare_final_candidates(["opendict"], "수", app.Filters())
@@ -317,7 +350,7 @@ class HelperTests(unittest.TestCase):
 
     def test_rare_final_candidates_finds_rebound_shot(self):
         rebound = app.normalize_item({"word": "리바운드^슛", "sense": {"pos": "품사 없음"}}, "stdict")
-        def fake_fetch(_d, query, _s, _c, _f, method="start"):
+        def fake_fetch(_d, query, _s, _c, _f, method="start", **_kwargs):
             return ([rebound], 1) if query == "슛" and method == "end" else ([], 0)
         with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
             words, warnings = app.rare_final_candidates(["stdict"], "리", app.Filters())
@@ -326,7 +359,7 @@ class HelperTests(unittest.TestCase):
 
     def test_rare_final_candidates_scans_deeper_end_pages(self):
         sodium = app.normalize_item({"word": "수산화나트륨", "sense": {"pos": "명사"}}, "opendict")
-        def fake_fetch(_d, query, start, _c, _f, method="start"):
+        def fake_fetch(_d, query, start, _c, _f, method="start", **_kwargs):
             return ([sodium], 450) if query == "륨" and method == "end" and start == 2 else ([], 450)
         with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
             words, warnings = app.rare_final_candidates(["opendict"], "수", app.Filters())
