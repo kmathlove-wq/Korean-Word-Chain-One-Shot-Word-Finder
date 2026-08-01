@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Learning Loop"
+  short_description: "Save verified project lessons for future tasks"
+  default_prompt: "Review the completed project task and persist only verified, reusable lessons."
