@@ -71,21 +71,24 @@ OPENDICT_API_KEY=우리말샘_키
 
 ### `app.py`
 
-- `DICTIONARIES`: 사전 이름, 공식 엔드포인트, 키 환경 변수, 상세 링크 형식.
-- `TTLCache`: 같은 사전·검색어·필터·페이지 호출을 30분간 재사용.
-- `Filters`: 모든 검색 필터와 캐시 키 직렬화.
+- `DICTIONARIES`: 사전 이름, 공식 엔드포인트, 키 환경 변수, 상세 링크 형식. `normalize_item()`은 http/https 아닌 링크를 버린다.
+- `TTLCache`: 같은 사전·검색어·필터·페이지 호출을 30분간 재사용. `fetch_dictionary()`는 항상 `copy.deepcopy` 복사본을 반환해 캐시 오염을 막는다.
+- `Filters`: 모든 검색 필터와 캐시 키 직렬화. 주소창 호출 기본값은 `FILTER_UI_DEFAULTS`(화면 체크 상태와 일치).
 - `fetch_dictionary()`: 인증, 재시도, 제한 시간, JSON/XML 파싱, 필터 적용.
 - `paged_search()`: 필터를 통과한 화면 페이지 수집.
-- `continuation_count()`: 후속 단어 존재 확인. 한 항목만 조회하도록 축소하면 한 글자 필터 때문에 거짓 한방 판정이 재발한다.
-- `search()`: 페이지 후보의 고유 마지막 음절을 최대 8개 작업자로 병렬 분석.
+- `continuation_count()`: 후속 단어 존재 확인. 한 항목만 조회하도록 축소하면 한 글자 필터 때문에 거짓 한방 판정이 재발한다. `dueum`이면 원음+정방향+역방향(`dueum_reverse_variants`)을 검사하고, 1페이지가 전부 걸리고 `total`이 크면 `start=2`를 한 번 더 본다. 사전 간 수는 `max`로 합친다(근사치).
+- `gather_one_shot_words()`: 한방단어 모드 전체 목록 1회 수집 + 캐시. 라우트는 이 목록을 페이지로 자른다.
+- `dedupe_display_words()`: 같은 표제어 병합 시 서로 다른 뜻을 `definitions`에 최대 3개 담는다.
+- `search()`: 페이지 후보의 고유 마지막 음절을 최대 8개 작업자로 병렬 분석. `page` 파싱 실패는 1로, 예외는 `logger.exception` 후 한국어 JSON.
 
 ### `static/main.js`
 
-- 모든 API/사용자 문자열은 DOM 삽입 전 `escapeHtml()`을 적용한다.
+- 모든 API/사용자 문자열은 DOM 삽입 전 `escapeHtml()`을 적용한다. `word.definitions`가 2개 이상이면 번호 목록으로 그린다.
 - `state.params`를 이용한 다음 페이지 요청을 유지한다.
 - 오류가 발생해도 `finally`에서 로딩을 숨긴다.
-- 검색 요청 중 기존 결과를 잘못 누적하지 않는다.
-- 정렬은 `state.words` 복사본에 적용해 원본을 변형하지 않는다.
+- 검색 요청 중 기존 결과를 잘못 누적하지 않는다. `searchSeq`로 오래된 응답이 새 응답을 덮어쓰지 않게 막는다.
+- 경고(`data.warnings`)는 결과가 0개여도 표시한다(경고 문구 먼저).
+- 정렬 `select` 변경은 서버에 새 요청을 보낸다. 브라우저 `sortedWords()`는 보조 정리용이다.
 
 ### `static/style.css`
 
@@ -100,9 +103,9 @@ OPENDICT_API_KEY=우리말샘_키
 - 시작 일치 검색은 `type_search=search`, `method=start`를 사용한다.
 - JSON을 우선 사용하고 XML은 안전한 대체 파서로 처리한다.
 - 단어의 마지막 글자는 문자열 끝이 아니라 마지막 유효 한글 음절이다.
-- 두음법칙은 `DUEUM_MAP`에서 중앙 관리하며 JavaScript에 중복 구현하지 않는다.
-- 원음 또는 두음 변환음 중 하나에라도 허용 단어가 있으면 한방단어가 아니다.
-- 후속 검색은 최소 100개 묶음에서 필터 통과 항목을 확인한다. 성능 최적화 시 이 정확성 조건을 깨지 않는다.
+- 두음법칙은 `app.py`의 규칙 집합(`DUEUM_L_TO_IEUNG` 등)과 `dueum_variant()`·`dueum_reverse_variants()`에서 중앙 관리하며 JavaScript에 중복 구현하지 않는다.
+- 원음·정방향·역방향 변환음 중 하나에라도 허용 단어가 있으면 한방단어가 아니다.
+- 후속 검색은 최소 100개 묶음에서 필터 통과 항목을 확인한다(필요 시 `start=2` 한 페이지 추가). 성능 최적화 시 이 정확성 조건을 깨지 않는다.
 - 동일한 마지막 음절은 요청 하나의 결과를 공유한다.
 - 사전 API 실패는 사용자에게 경고 메시지로 전달한다.
 

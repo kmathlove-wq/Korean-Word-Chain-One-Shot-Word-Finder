@@ -3,7 +3,7 @@ services:
     name: word-chain-one-shot-search
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app
+    startCommand: gunicorn app:app --workers 2 --threads 4 --timeout 60
     healthCheckPath: /api/health
     envVars:
       - key: STDICT_API_KEY

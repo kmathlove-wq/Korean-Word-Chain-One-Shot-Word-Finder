@@ -58,7 +58,7 @@ OPENDICT_API_KEY=우리말샘_키
 | `GET /api/health` | 서버 상태와 사전별 키 설정 여부 반환 |
 | `GET /api/search` | 시작 단어 검색, 필터, 한방 판정, 페이지 응답 |
 
-`/api/search`의 주요 매개변수는 `query`, `dictionary`, `mode`, `page`, `noun_only`, `include_proper`, `include_north`, `include_dialect`, `include_old`, `include_technical`, `include_single`, `dueum`이다. `dictionary` 값은 `stdict`, `opendict` 중 하나다. `mode` 값은 `all`, `words`, `one-shot` 중 하나다.
+`/api/search`의 주요 매개변수는 `query`, `dictionary`, `mode`, `page`, `noun_only`, `include_proper`, `include_north`, `include_dialect`, `include_old`, `include_technical`, `include_single`, `dueum`이다. `dictionary` 값은 `stdict`, `opendict` 중 하나다. `mode` 값은 `all`, `words`, `one-shot` 중 하나다. 필터 매개변수를 생략하면 화면 체크박스 기본값(`FILTER_UI_DEFAULTS`: 한 글자 포함만 꺼짐, 나머지 켜짐, 두음 켜짐)을 따른다. `page`에 숫자가 아닌 값이 오면 1로 처리한다.
 
 ## 백엔드 핵심 규칙
 
@@ -68,9 +68,10 @@ OPENDICT_API_KEY=우리말샘_키
 - 검색 방식은 `type_search=search`, `method=start`인 시작 일치 검색이다.
 - 요청 제한 시간은 연결 10초/응답 20초이며 실패 시 한 번 재시도한다.
 - 화면 페이지 크기는 24개, 공식 API 묶음 크기는 100개다.
-- 필터로 앞쪽 결과가 모두 제거될 수 있으므로 `paged_search()`는 필요한 결과가 모일 때까지 최대 500개 범위에서 다음 묶음을 확인한다.
-- 메모리 `TTLCache`의 기본 만료 시간은 30분이다. 서버 재시작 시 사라지며 프로세스 간 공유되지 않는다.
+- 필터로 앞쪽 결과가 모두 제거될 수 있으므로 `paged_search()`는 필요한 결과가 모일 때까지 최대 `MAX_API_SCAN`(10)묶음 × 100개 ≈ 1000개 범위에서 다음 묶음을 확인한다.
+- 메모리 `TTLCache`의 기본 만료 시간은 30분이다. 서버 재시작 시 사라지며 프로세스 간 공유되지 않는다. `fetch_dictionary()`는 캐시 원본 오염을 막으려고 항상 `copy.deepcopy`한 복사본을 돌려준다.
 - 화면에서는 표준국어대사전 또는 우리말샘 중 하나만 선택해 검색한다.
+- 한방단어 모드(`mode=one-shot`)는 `gather_one_shot_words()`가 전체 한방단어 목록을 한 번 모아 `(검색어, 사전, 필터, 두음)` 키로 캐시하고, 라우트는 그 목록을 페이지 크기로 자른다. 페이지 2 이상도 빈 결과 없이 정확히 동작한다.
 
 ## 한방단어 판정
 
@@ -78,20 +79,22 @@ OPENDICT_API_KEY=우리말샘_키
 - `continuation_count()`는 마지막 음절로 시작하는 단어를 선택 사전에서 다시 검색한다.
 - 첫 항목이 한 글자 제외 등의 필터에 걸리는 오판을 방지하기 위해 후속 검색은 최대 100개 묶음을 확인한다.
 - 필터를 통과한 후속 단어가 하나라도 있으면 한방단어가 아니다.
-- `dueum=true`이면 원래 음절과 `DUEUM_MAP` 변환 음절을 모두 검사한다. 어느 한쪽에라도 단어가 있으면 한방단어가 아니다.
-- 현재 이어갈 단어 수는 필터 통과 항목이 확인된 API 시작 일치 총계를 사용한다. 두음 변형 결과 수에는 중복이 포함될 수 있다.
+- `dueum=true`이면 `continuation_count()`는 원음 + 정방향 변환음(`dueum_variant`) + 역방향 원래 소리(`dueum_reverse_variants`, 예: 여→려·녀)를 모두 검사한다. 어느 하나라도 단어가 있으면 한방단어가 아니다. (단어 목록 경로 `paged_search_with_dueum`은 바꾸지 않는다.)
+- 1페이지가 전부 필터에 걸려도 API 전체 수(`total`)가 한 페이지보다 크면 딱 한 페이지(`start=2`)를 더 확인한 뒤 0으로 판정한다.
+- 이어갈 단어 수는 근사치다. 같은 음절을 두 사전에서 조회하면 겹치는 단어가 이중 계산되므로 사전 간에는 `max`, 서로 다른 두음 변형 간에는 `sum`으로 합친다. 이 수는 정렬·카드 표시용이며 한방 O/X 판정에는 쓰지 않는다.
 
 ## 두음법칙
 
-두음 변환은 프런트엔드에 복제하지 않고 `app.py`의 `DUEUM_MAP`과 `get_dueum_variants()`에서만 관리한다. 현재 지원 변환은 `녀→여`, `뇨→요`, `뉴→유`, `니→이`, `랴→야`, `려→여`, `례→예`, `료→요`, `류→유`, `리→이`, `라→나`, `래→내`, `로→노`, `뢰→뇌`, `루→누`, `르→느`다.
+두음 변환은 프런트엔드에 복제하지 않고 `app.py`의 초성/모음 규칙 집합(`DUEUM_L_TO_IEUNG`, `DUEUM_L_TO_NIEUN`, `DUEUM_N_TO_IEUNG`)과 `dueum_variant()` / `get_dueum_variants()` / `dueum_reverse_variants()`에서만 관리한다. 정방향 예: `려→여`, `라→나`, `녀→여`, `로→노`. 역방향(한방 판정 전용) 예: `여→려·녀`, `이→리·니`, `나→라`, `노→로`, `뇌→뢰`.
 
 ## 프런트엔드 규칙
 
 - 폼 제출 또는 Enter 입력 시에만 검색한다.
 - 클라이언트에서도 완성형 한글 1~20자인지 검사하지만 서버 검증을 항상 유지한다.
-- 사용자/API 문자열은 `escapeHtml()`을 거쳐 렌더링한다.
+- 사용자/API 문자열은 `escapeHtml()`을 거쳐 렌더링한다. 동음이의어는 `word.definitions`(최대 3개)를 번호 목록으로 그린다.
 - 로딩·메시지·결과 영역은 `hidden` 속성으로 제어하며 `[hidden]{display:none!important}` 규칙을 유지한다.
-- 정렬은 현재 브라우저에 불러온 결과를 대상으로 한다.
+- 정렬 `select`를 바꾸면 서버에 새로 요청한다(정렬 기준별 후보 수집 방식이 다르기 때문). 브라우저 안에서도 `sortedWords()`로 한 번 더 정리하지만 최종 정렬은 서버 응답 순서를 따른다.
+- 느린 이전 응답이 새 응답을 덮어쓰지 않도록 `searchSeq`로 순번을 확인한다.
 - 모바일에서 상세 설정은 `details` 요소로 접을 수 있어야 한다.
 
 ## 테스트

@@ -8,6 +8,7 @@ const moreButton = document.querySelector('#more-button');
 const moreTopButton = document.querySelector('#more-top-button');
 const sortSelect = document.querySelector('#sort-select');
 let state = { page: 1, words: [], hasMore: false, params: null, recentKeys: new Set(), prefetch: null };
+let searchSeq = 0;
 
 const setHidden = (element, hidden) => { element.hidden = hidden; };
 const escapeHtml = (value = '') => String(value).replace(/[&<>'"]/g, char => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
@@ -40,10 +41,13 @@ function card(word) {
   const nextCount = word.count_available === false ? '확인 실패' : `${word.next_word_count}개`;
   const hangulLength = (word.word.match(/[가-힣]/g) || []).length;
   const widthClass = hangulLength >= 18 ? ' very-wide' : hangulLength >= 10 ? ' wide' : '';
+  const definitionHtml = Array.isArray(word.definitions) && word.definitions.length > 1
+    ? `<ol class="definition definition-list">${word.definitions.map(sense => `<li>${escapeHtml(sense.definition)}</li>`).join('')}</ol>`
+    : `<p class="definition">${escapeHtml(word.definition)}</p>`;
   return `<article class="word-card ${word.is_one_shot ? 'one-shot' : ''}${widthClass}"${isNew ? ' data-new-result="true"' : ''}>
     <div class="card-top"><h3>${escapeHtml(word.word)}</h3>${word.is_one_shot ? '<span class="badge">한방단어</span>' : ''}</div>
     <p class="pos">${escapeHtml(word.part_of_speech)} · ${escapeHtml(word.dictionary)}</p>
-    <p class="definition">${escapeHtml(word.definition)}</p>
+    ${definitionHtml}
     <div class="stats"><span>마지막 글자 <strong>${escapeHtml(word.last_syllable)}</strong></span><span>이어갈 단어 <strong>${escapeHtml(nextCount)}</strong></span></div>
     <div class="card-actions">${details}<button class="copy" type="button" data-copy="${escapeHtml(word.word)}">복사</button></div>
   </article>`;
@@ -124,11 +128,14 @@ async function search(page = 1, append = false) {
   setHidden(message, true); setHidden(loading, false); if (!append) setHidden(results, true);
   moreButton.disabled = true;
   moreTopButton.disabled = true;
+  const mySeq = ++searchSeq;
   try {
     const key = params.toString();
     const cached = append && state.prefetch?.key === key ? await state.prefetch.promise : null;
+    if (mySeq !== searchSeq) return;
     if (cached?.error) throw cached.error;
     const data = cached?.data || await requestSearch(params);
+    if (mySeq !== searchSeq) return;
     const existingKeys = new Set(state.words.map(wordKey));
     const incomingWords = uniqueWords(data.words);
     const newWords = append ? incomingWords.filter(word => !existingKeys.has(wordKey(word))) : [];
@@ -136,10 +143,16 @@ async function search(page = 1, append = false) {
     state = {page, words: nextWords, hasMore: data.has_more, params: key, recentKeys: append ? new Set(newWords.map(wordKey)) : new Set(), prefetch: null};
     render(data);
     if (append && !scrollToNewResults()) requestAnimationFrame(() => moreButton.scrollIntoView({behavior: 'smooth', block: 'center'}));
-    if (!data.words.length && params.get('mode') === 'one-shot' && data.has_more) showMessage('이번 탐색 구간에서는 한방단어를 찾지 못했습니다. 아래의 다음 결과 보기를 누르면 더 뒤쪽 단어까지 정밀 탐색합니다.', 'notice');
-    else if (!data.words.length && params.get('mode') === 'one-shot') showMessage('확인된 한방단어가 없습니다. 오류가 아니라, 선택한 사전과 필터 기준에서 끝까지 확인했지만 한방단어를 찾지 못한 상태입니다.', 'notice');
-    else if (!data.words.length) showMessage('조건에 맞는 단어를 찾지 못했습니다. 필터를 바꿔 보세요.', 'notice');
-    else if (data.warnings?.length) showMessage(`일부 결과 안내: ${data.warnings.join(' ')}`, 'notice');
+    const warningText = data.warnings?.length ? `일부 결과 안내: ${data.warnings.join(' ')}` : '';
+    if (!data.words.length) {
+      let emptyText;
+      if (params.get('mode') === 'one-shot' && data.has_more) emptyText = '이번 페이지에서는 한방단어를 찾지 못했습니다. 아래의 다음 결과 보기를 눌러 보세요.';
+      else if (params.get('mode') === 'one-shot') emptyText = '확인된 한방단어가 없습니다. 오류가 아니라, 선택한 사전과 필터 기준에서 끝까지 확인했지만 한방단어를 찾지 못한 상태입니다.';
+      else emptyText = '조건에 맞는 단어를 찾지 못했습니다. 필터를 바꿔 보세요.';
+      showMessage(warningText ? `${warningText}\n${emptyText}` : emptyText, 'notice');
+    } else if (warningText) {
+      showMessage(warningText, 'notice');
+    }
     prefetchNextPage();
   } catch (error) { showMessage(error.message); }
   finally { setHidden(loading, true); moreButton.disabled = false; moreTopButton.disabled = false; }

@@ -18,6 +18,10 @@ SAMPLE = {
 
 
 class HelperTests(unittest.TestCase):
+    def setUp(self):
+        # 테스트 간 캐시 오염(gather_one_shot_words, fetch_dictionary)을 막는다.
+        app.cache._items.clear()
+
     def test_dueum_and_last_syllable(self):
         self.assertEqual(app.get_dueum_variants("녀"), ["녀", "여"])
         self.assertEqual(app.get_dueum_variants("련"), ["련", "연"])
@@ -270,26 +274,6 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(count.call_args.args[1], "녘")
         rare.assert_not_called()
 
-    def test_one_shot_scan_collects_parallel_page_results(self):
-        first = app.normalize_item({"word": "표가", "sense": {"pos": "명사"}}, "opendict")
-        fifth = app.normalize_item({"word": "표튬", "sense": {"pos": "명사"}}, "opendict")
-
-        def fake_fetch(_dictionary, _query, start, _count, _filters, **_kwargs):
-            if start == 1:
-                return [first], 714
-            if start == 5:
-                return [fifth], 714
-            return [], 714
-
-        with patch.object(app, "fetch_dictionary", side_effect=fake_fetch) as fetch:
-            words, total, has_more, warnings = app.one_shot_scan_candidates(["opendict"], "표", app.Filters(), 1)
-        self.assertEqual(sorted(word["word"] for word in words), ["표가", "표튬"])
-        self.assertEqual(total, 714)
-        self.assertTrue(has_more)
-        self.assertEqual(warnings, [])
-        self.assertEqual(fetch.call_count, app.ONE_SHOT_SCAN_WINDOW)
-        self.assertTrue(all(call.kwargs["attempts"] == 1 for call in fetch.call_args_list))
-
     def test_prefix_expansion_skips_generic_probes_without_rare_seed(self):
         common = app.normalize_item({"word": "표가", "sense": {"pos": "명사"}}, "opendict")
         with patch.object(app, "fetch_dictionary") as fetch:
@@ -317,26 +301,6 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["total"], 1)
         self.assertEqual(response.json["one_shot_count"], 1)
-        rare.assert_not_called()
-
-    def test_one_shot_mode_can_continue_after_empty_scan_window(self):
-        with patch.object(app, "paged_search", return_value=([], 12651, [])), \
-             patch.object(app, "rare_final_candidates", return_value=([], [])):
-            response = app.app.test_client().get("/api/search?query=수&dictionary=opendict&mode=one-shot&sort=alphabet")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json["words"], [])
-        self.assertTrue(response.json["has_more"])
-
-    def test_one_shot_mode_uses_requested_filtered_page(self):
-        shot = app.normalize_item({"word": "수산화나트륨", "sense": {"pos": "품사 미상"}}, "opendict")
-        with patch.object(app, "paged_search", return_value=([shot], 12651, [])) as paged, \
-             patch.object(app, "rare_final_candidates") as rare, \
-             patch.object(app, "continuation_count", return_value=(0, [])):
-            response = app.app.test_client().get("/api/search?query=수&dictionary=opendict&mode=one-shot&sort=alphabet&page=2&noun_only=true&include_technical=true")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json["words"][0]["word"], "수산화나트륨")
-        self.assertTrue(response.json["has_more"])
-        self.assertEqual(paged.call_args.args[3], 2)
         rare.assert_not_called()
 
     def test_one_shot_mode_expands_rare_candidate_prefixes(self):
@@ -443,23 +407,6 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(analysed[0]["next_word_count"], 1)
         self.assertEqual([call.args[1] for call in fetch.call_args_list], ["슘"])
 
-    def test_merged_search_continues_after_filtered_empty_batch(self):
-        later = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
-        with patch.object(app, "fetch_dictionary", side_effect=[([], 2911), ([later], 2911)]) as fetch:
-            words, total, warnings = app.merged_search(["stdict"], "리", app.Filters(), limit=1)
-        self.assertEqual(total, 2911)
-        self.assertEqual(warnings, [])
-        self.assertEqual([word["word"] for word in words], ["리튬"])
-        self.assertEqual([call.args[2] for call in fetch.call_args_list], [1, 2])
-
-    def test_merged_search_stops_on_api_start_limit(self):
-        with patch.object(app, "fetch_dictionary", side_effect=[([], 2911), app.ApiError("Invalid start value")]) as fetch:
-            words, total, warnings = app.merged_search(["opendict"], "리", app.Filters(), limit=1)
-        self.assertEqual(words, [])
-        self.assertEqual(total, 2911)
-        self.assertEqual(warnings, [])
-        self.assertEqual(fetch.call_count, 2)
-
     def test_paged_search_uses_filtered_total_after_scanning_last_api_page(self):
         allowed_words = [
             app.normalize_item({"word": f"는개{index}", "sense": {"pos": "명사"}}, "stdict")
@@ -507,16 +454,6 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(fetch.call_count, 1)
         self.assertEqual(fetch.call_args.args[3], app.FAST_CONTINUATION_PAGE_SIZE)
 
-    def test_one_shot_page_prioritizes_rare_finals(self):
-        common = [app.normalize_item({"word": f"리가{i}", "sense": {"pos": "명사"}}, "stdict") for i in range(40)]
-        lithium = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
-        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True):
-            return (0, []) if syllable == "튬" else (10, [])
-        with patch.object(app, "continuation_count", side_effect=count_for_syllable):
-            _analysed, visible, _has_more, warnings = app.one_shot_page(["stdict"], common + [lithium], app.Filters(), True, 1)
-        self.assertEqual(warnings, [])
-        self.assertEqual(visible[0]["word"], "리튬")
-
     def test_fast_analysis_verifies_rare_final_before_marking_one_shot(self):
         lithium = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
         common = app.normalize_item({"word": "리본", "sense": {"pos": "명사"}}, "stdict")
@@ -526,6 +463,93 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(analysed[0]["is_one_shot"])
         self.assertFalse(analysed[1]["is_one_shot"])
         count.assert_called_once()
+
+
+    # --- 조각 1 회귀 테스트: 한방 판정 정확도 ---
+    def test_continuation_checks_second_page_when_first_page_filtered_but_total_large(self):
+        follow = app.normalize_item({"word": "가나다", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "fetch_dictionary", side_effect=[([], 500), ([follow], 500)]) as fetch:
+            count, warnings = app.continuation_count(["stdict"], "가", app.Filters(), False)
+        self.assertEqual(warnings, [])
+        self.assertEqual(count, 500)
+        self.assertEqual([call.args[2] for call in fetch.call_args_list], [1, 2])
+
+    def test_continuation_reverse_dueum_word_prevents_false_one_shot(self):
+        # 앞말이 '여'로 끝나도 다음 사람은 '려'로 시작할 수 있으므로 한방이 아니다.
+        follow = app.normalize_item({"word": "려증", "sense": {"pos": "명사"}}, "stdict")
+
+        def fake_fetch(_d, query, _s, _c, _f, **_kwargs):
+            return ([follow], 3) if query == "려" else ([], 0)
+
+        with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
+            count, warnings = app.continuation_count(["stdict"], "여", app.Filters(), True, exact=False)
+        self.assertEqual(warnings, [])
+        self.assertGreater(count, 0)
+
+    def test_continuation_count_uses_max_across_dictionaries_not_sum(self):
+        a = app.normalize_item({"word": "가가", "sense": {"pos": "명사"}}, "stdict")
+        b = app.normalize_item({"word": "가가", "sense": {"pos": "명사"}}, "opendict")
+
+        def fake_fetch(dictionary, _q, _s, _c, _f, **_kwargs):
+            return ([a], 100) if dictionary == "stdict" else ([b], 120)
+
+        with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
+            count, warnings = app.continuation_count(["stdict", "opendict"], "가", app.Filters(), False)
+        self.assertEqual(warnings, [])
+        self.assertEqual(count, 120)
+
+    def test_dueum_reverse_variants_inverts_forward_rules(self):
+        self.assertEqual(sorted(app.dueum_reverse_variants("여")), sorted(["려", "녀"]))
+        self.assertEqual(sorted(app.dueum_reverse_variants("이")), sorted(["리", "니"]))
+        self.assertEqual(app.dueum_reverse_variants("나"), ["라"])
+        self.assertEqual(app.dueum_reverse_variants("노"), ["로"])
+        self.assertEqual(app.dueum_reverse_variants("뇌"), ["뢰"])
+        self.assertEqual(app.dueum_reverse_variants("각"), [])
+
+    # --- 조각 2 회귀 테스트: 한방단어 모드 페이지 넘김 ---
+    def test_one_shot_mode_page_two_slices_full_gathered_list(self):
+        words = [
+            app.normalize_item({"word": f"리가{index:02d}", "sense": {"pos": "명사"}}, "stdict")
+            for index in range(30)
+        ]
+        with patch.object(app, "paged_search", return_value=(words, 5000, [])), \
+             patch.object(app, "rare_final_candidates", return_value=([], [])), \
+             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
+             patch.object(app, "continuation_count", return_value=(0, [])):
+            first = app.app.test_client().get(
+                "/api/search?query=리&dictionary=stdict&mode=one-shot&sort=alphabet&dueum=false&page=1"
+            )
+            second = app.app.test_client().get(
+                "/api/search?query=리&dictionary=stdict&mode=one-shot&sort=alphabet&dueum=false&page=2"
+            )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(len(first.json["words"]), 24)
+        self.assertTrue(first.json["has_more"])
+        self.assertEqual(len(second.json["words"]), 6)
+        self.assertFalse(second.json["has_more"])
+
+    def test_one_shot_mode_no_empty_page_with_more_when_list_exhausted(self):
+        with patch.object(app, "paged_search", return_value=([], 12651, [])), \
+             patch.object(app, "rare_final_candidates", return_value=([], [])), \
+             patch.object(app, "prefix_expansion_candidates", return_value=([], [])):
+            response = app.app.test_client().get(
+                "/api/search?query=수&dictionary=opendict&mode=one-shot&sort=alphabet"
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["words"], [])
+        self.assertFalse(response.json["has_more"])
+
+    # --- 조각 4 회귀 테스트: 동음이의어 뜻 묶음 ---
+    def test_two_senses_of_same_headword_merge_into_one_card(self):
+        first = app.normalize_item({"word": "배", "sense": {"pos": "명사", "definition": "먹는 배."}}, "stdict")
+        second = app.normalize_item({"word": "배", "sense": {"pos": "명사", "definition": "타는 배."}}, "stdict")
+        third = app.normalize_item({"word": "배", "sense": {"pos": "명사", "definition": "배 [곱절]."}}, "stdict")
+        fourth = app.normalize_item({"word": "배", "sense": {"pos": "명사", "definition": "신체 부위 배."}}, "stdict")
+        merged = app.dedupe_display_words([first, second, third, fourth])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(len(merged[0]["definitions"]), 3)
+        self.assertEqual(merged[0]["definition"], "먹는 배.")
+        self.assertEqual(merged[0]["definitions"][0]["definition"], "먹는 배.")
 
 
 if __name__ == "__main__":

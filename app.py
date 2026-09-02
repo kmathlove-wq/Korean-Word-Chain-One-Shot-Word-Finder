@@ -1,6 +1,8 @@
 """국립국어원 공식 Open API 기반 끝말잇기 한방단어 검색기."""
 from __future__ import annotations
 
+import copy
+import logging
 import os
 import re
 import threading
@@ -22,14 +24,13 @@ except ImportError:  # requirements 설치 전에도 환경 변수 방식으로 
 
 load_dotenv()
 
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
 
 PAGE_SIZE = 24
 API_PAGE_SIZE = 100
-MAX_CANDIDATES = 300
-SORT_CANDIDATES = MAX_CANDIDATES
 MAX_API_SCAN = 10
-ONE_SHOT_SCAN_WINDOW = 5
 PREFIX_EXPANSION_LIMIT = 6
 PREFIX_EXPANSION_PAGE_SIZE = API_PAGE_SIZE
 PREFIX_EXPANSION_SCAN_LIMIT = 1
@@ -37,12 +38,9 @@ RARE_PROBE_PAGE_SIZE = 100
 RARE_PROBE_DEEP_START = 10
 RARE_PROBE_SHALLOW_START = 2
 RARE_CANDIDATE_LIMIT = 120
-ONE_SHOT_CHUNK_SIZE = 8
 ONE_SHOT_ANALYSIS_LIMIT = 80
-NEXT_SORT_ANALYSIS_LIMIT = PAGE_SIZE * 2
 FAST_CONTINUATION_PAGE_SIZE = API_PAGE_SIZE
 FAST_REQUEST_TIMEOUT = (2, 3)
-SCAN_REQUEST_TIMEOUT = (4, 8)
 MAX_QUERY_LENGTH = 20
 CACHE_TTL = 60 * 30
 REQUEST_TIMEOUT = (10, 20)
@@ -135,6 +133,30 @@ def get_dueum_variants(syllable: str) -> list[str]:
     return list(dict.fromkeys([syllable, dueum_variant(syllable)]))
 
 
+def dueum_reverse_variants(syllable: str) -> list[str]:
+    """두음법칙으로 이 음절이 되는 '원래 소리' 음절들을 반환한다(역방향).
+
+    끝말잇기에서 두음법칙을 허용하면, 앞말이 '여'로 끝나도 다음 사람은
+    '려'나 '녀'로 시작할 수 있다. 그래서 한방(막다른) 판정을 할 때는
+    원래 소리 표기까지 함께 확인해야 성급하게 0으로 판정하지 않는다.
+    예: 여 -> [려, 녀], 이 -> [리, 니], 나 -> [라], 노 -> [로], 뇌 -> [뢰]
+    """
+    if len(syllable) != 1 or not (HANGUL_BASE <= ord(syllable) <= HANGUL_END):
+        return []
+    offset = ord(syllable) - HANGUL_BASE
+    initial = HANGUL_INITIALS[offset // 588]
+    vowel_index = (offset % 588) // 28
+    final_index = offset % 28
+    vowel = HANGUL_VOWELS[vowel_index]
+    results: list[str] = []
+    if initial == "ㅇ" and vowel in DUEUM_L_TO_IEUNG:
+        results.append(compose_hangul("ㄹ", vowel_index, final_index))
+        results.append(compose_hangul("ㄴ", vowel_index, final_index))
+    if initial == "ㄴ" and vowel in DUEUM_L_TO_NIEUN:
+        results.append(compose_hangul("ㄹ", vowel_index, final_index))
+    return list(dict.fromkeys(results))
+
+
 def convert_dueum_word(word: str) -> str:
     """단어 첫 음절에 두음법칙을 적용한 표기를 반환한다."""
     return dueum_variant(word[0]) + word[1:] if word else word
@@ -178,6 +200,27 @@ class Filters:
         return tuple(vars(self).values())
 
 
+# 주소창 직접 호출용 필터 기본값 = 화면(index.html) 체크박스 기본 상태.
+# 켜짐: 명사만/고유명사/북한어/방언/옛말/전문어 포함, 꺼짐: 한 글자 포함.
+FILTER_UI_DEFAULTS = {
+    "noun_only": True,
+    "include_proper": True,
+    "include_north": True,
+    "include_dialect": True,
+    "include_old": True,
+    "include_technical": True,
+    "include_single": False,
+}
+
+
+def safe_int(value: Any, default: int = 0) -> int:
+    """API 응답의 숫자 필드가 비었거나 이상해도 영어 오류 대신 기본값을 쓴다."""
+    try:
+        return int(value)
+    except (ValueError, TypeError):
+        return default
+
+
 def scalar(value: Any, default: str = "") -> str:
     if isinstance(value, dict):
         value = value.get("#text", value.get("text", default))
@@ -191,7 +234,7 @@ def parse_json(data: dict, dictionary: str) -> tuple[list[dict], int]:
     raw_items = channel.get("item", []) if isinstance(channel, dict) else []
     if isinstance(raw_items, dict):
         raw_items = [raw_items]
-    total = int(scalar(channel.get("total", 0), "0") or 0)
+    total = safe_int(scalar(channel.get("total", 0), "0") or 0)
     return [normalize_item(item, dictionary) for item in raw_items], total
 
 
@@ -203,7 +246,7 @@ def parse_xml(text: str, dictionary: str) -> tuple[list[dict], int]:
     error = root.findtext(".//error") or root.findtext(".//message")
     if error and not root.findall(".//item"):
         raise ApiError(error)
-    total = int(root.findtext(".//total") or 0)
+    total = safe_int(root.findtext(".//total") or 0)
     items = []
     for node in root.findall(".//item"):
         item = {child.tag: child.text or "" for child in node}
@@ -224,6 +267,9 @@ def normalize_item(item: dict, dictionary: str) -> dict:
     detail = scalar(item.get("link"))
     if not detail and word:
         detail = DICTIONARIES[dictionary]["detail"].format(word=quote(word))
+    # API가 준 링크가 http/https가 아니면(javascript: 등) 버린다.
+    if not detail.startswith(("http://", "https://")):
+        detail = ""
     return {
         "word": word,
         "part_of_speech": scalar(sense.get("pos") or item.get("pos"), "품사 미상"),
@@ -252,11 +298,38 @@ def exact_word_key(word: dict) -> tuple[str, str, str]:
     return (compact_text(word.get("word", "")), compact_text(word.get("part_of_speech", "")), compact_text(word.get("definition", "")))
 
 
+DISPLAY_SENSE_LIMIT = 3
+
+
 def dedupe_display_words(words: list[dict]) -> list[dict]:
-    """API가 반복해서 준 같은 표제어는 화면에서 하나로 합친다."""
-    merged: dict[tuple[str], dict] = {}
+    """같은 표제어는 화면에서 한 카드로 합치되, 서로 다른 뜻을 최대 3개까지 모은다.
+
+    동음이의어(예: 배 - 과일/신체/탈것)는 같은 표제어라 하나로 묶이지만
+    뜻이 다르므로 `definitions` 목록에 구분해 담는다. 첫 뜻은 기존 코드
+    호환을 위해 `definition`/`part_of_speech`로도 그대로 남긴다.
+    """
+    merged: dict[str, dict] = {}
     for word in words:
-        merge_word(merged, word, (compact_text(word.get("word", "")),))
+        wkey = compact_text(word.get("word", ""))
+        current = merged.get(wkey)
+        if current is None:
+            word["definitions"] = [{
+                "definition": word.get("definition", ""),
+                "part_of_speech": word.get("part_of_speech", ""),
+            }]
+            merged[wkey] = word
+            continue
+        for code in word["dictionary_codes"]:
+            if code not in current["dictionary_codes"]:
+                current["dictionary_codes"].append(code)
+        if len(current["definitions"]) >= DISPLAY_SENSE_LIMIT:
+            continue
+        incoming = compact_text(word.get("definition", ""))
+        if incoming and not any(compact_text(sense["definition"]) == incoming for sense in current["definitions"]):
+            current["definitions"].append({
+                "definition": word.get("definition", ""),
+                "part_of_speech": word.get("part_of_speech", ""),
+            })
     return list(merged.values())
 
 
@@ -298,7 +371,12 @@ def fetch_dictionary(
     cache_key = (dictionary, query, method, filters.key(), start, count)
     cached = cache.get(cache_key)
     if cached is not None:
-        return cached
+        # 호출자가 analyse_words 등에서 dict를 직접 수정하므로 캐시 원본이
+        # 오염되지 않도록 항상 개인 복사본을 돌려준다.
+        return copy.deepcopy(cached)
+    # 가정: 공식 API의 start 는 '페이지 번호'(1,2,3...)다. 만약 실제로는
+    # '레코드 오프셋'이라면 100개를 넘는 페이지 넘김이 어긋난다. 키가 생기면
+    # 보고서의 '키 없이 확인 불가' 항목대로 실제 응답으로 검증할 것.
     params = {"key": key, "q": query, "req_type": "json", "type_search": "search", "method": method, "start": start, "num": count, "advanced": "y"}
     last_error: requests.RequestException | None = None
     for attempt in range(attempts):
@@ -323,44 +401,13 @@ def fetch_dictionary(
         result = parse_xml(response.text, dictionary)
     result = ([word for word in result[0] if allowed(word, filters)], result[1])
     cache.set(cache_key, result)
-    return result
+    return copy.deepcopy(result)
 
 
 def selected_dictionaries(value: str) -> list[str]:
     if value not in DICTIONARIES:
         raise ValueError("표준국어대사전 또는 우리말샘 중 하나를 선택해 주세요.")
     return [value]
-
-
-def merged_search(dictionaries: list[str], query: str, filters: Filters, limit: int = MAX_CANDIDATES) -> tuple[list[dict], int, list[str]]:
-    merged: dict[str, dict] = {}
-    totals, warnings = 0, []
-    for dictionary in dictionaries:
-        try:
-            words, total = [], 0
-            api_start = 1
-            # 필터로 특정 API 묶음이 모두 제외되어도 뒤쪽에 허용 단어가 있을 수 있으므로
-            # 공식 API가 허용하는 시작값 범위 안에서 제한된 깊이까지 계속 훑는다.
-            while len(words) < limit and api_start <= MAX_API_SCAN:
-                try:
-                    batch, reported_total = fetch_dictionary(dictionary, query, api_start, API_PAGE_SIZE, filters)
-                except ApiError as exc:
-                    if "Invalid start value" in str(exc):
-                        break
-                    raise
-                total = reported_total
-                words.extend(batch)
-                if api_start * API_PAGE_SIZE >= reported_total:
-                    break
-                api_start += 1
-            totals += total
-            for word in words:
-                merge_word(merged, word)
-        except ApiError as exc:
-            warnings.append(str(exc))
-    if not merged and warnings:
-        raise ApiError(" ".join(warnings))
-    return list(merged.values())[:limit], totals, warnings
 
 
 def rare_final_candidates(
@@ -428,47 +475,6 @@ def rare_final_candidates(
     return list(merged.values()), list(dict.fromkeys(warnings))
 
 
-def one_shot_scan_candidates(dictionaries: list[str], query: str, filters: Filters, page: int) -> tuple[list[dict], int, bool, list[str]]:
-    """한방단어 모드에서 시작 검색 결과를 구간별로 정밀 탐색한다."""
-    merged: dict[str, dict] = {}
-    total, warnings = 0, []
-    start_from = (page - 1) * ONE_SHOT_SCAN_WINDOW + 1
-    scan_until = page * ONE_SHOT_SCAN_WINDOW
-
-    def probe(job: tuple[str, int]) -> tuple[str, int, list[dict], int, list[str]]:
-        dictionary, api_start = job
-        try:
-            batch, dictionary_total = fetch_dictionary(
-                dictionary,
-                query,
-                api_start,
-                API_PAGE_SIZE,
-                filters,
-                request_timeout=SCAN_REQUEST_TIMEOUT,
-                attempts=1,
-            )
-            return dictionary, api_start, batch, dictionary_total, []
-        except ApiError as exc:
-            if "Invalid start value" in str(exc):
-                return dictionary, api_start, [], 0, []
-            return dictionary, api_start, [], 0, [str(exc)]
-
-    jobs = [(dictionary, api_start) for dictionary in dictionaries for api_start in range(start_from, scan_until + 1)]
-    totals: dict[str, int] = {dictionary: 0 for dictionary in dictionaries}
-    with ThreadPoolExecutor(max_workers=min(8, max(1, len(jobs)))) as executor:
-        futures = [executor.submit(probe, job) for job in jobs]
-        for future in as_completed(futures):
-            dictionary, _api_start, batch, dictionary_total, notes = future.result()
-            totals[dictionary] = max(totals[dictionary], dictionary_total)
-            warnings.extend(notes)
-            for word in batch:
-                merge_word(merged, word)
-    total = sum(totals.values())
-    if not merged and warnings:
-        raise ApiError(" ".join(warnings))
-    return list(merged.values()), total, scan_until * API_PAGE_SIZE < total, list(dict.fromkeys(warnings))
-
-
 def prefix_expansion_candidates(dictionaries: list[str], query: str, seeds: list[dict], filters: Filters) -> tuple[list[dict], list[str]]:
     """이미 찾은 희귀 끝글자 후보의 앞부분으로 다시 좁혀 숨은 같은 계열 후보를 찾는다."""
     prefixes: list[str] = []
@@ -532,13 +538,21 @@ def prefix_expansion_candidates(dictionaries: list[str], query: str, seeds: list
 
 
 def continuation_count(dictionaries: list[str], syllable: str, filters: Filters, dueum: bool, exact: bool = True) -> tuple[int, list[str]]:
-    variants = get_dueum_variants(syllable) if dueum else [syllable]
+    if dueum:
+        # 두음법칙 허용 시: 원음 + 정방향 변환음 + 역방향(원래 소리)까지 모두 확인한다.
+        variants = list(dict.fromkeys(
+            [syllable, dueum_variant(syllable), *dueum_reverse_variants(syllable)]
+        ))
+    else:
+        variants = [syllable]
     total_count = 0
     warnings = []
     page_size = API_PAGE_SIZE if exact else FAST_CONTINUATION_PAGE_SIZE
     request_timeout = REQUEST_TIMEOUT if exact else FAST_REQUEST_TIMEOUT
     attempts = REQUEST_ATTEMPTS if exact else 1
     for variant in variants:
+        variant_total = 0
+        variant_has_word = False
         for dictionary in dictionaries:
             try:
                 # 첫 항목이 한 글자 등의 필터에 걸려도 오판하지 않도록 한 묶음을 확인한다.
@@ -551,26 +565,32 @@ def continuation_count(dictionaries: list[str], syllable: str, filters: Filters,
                     request_timeout=request_timeout,
                     attempts=attempts,
                 )
+                if not words and total > page_size:
+                    # 1페이지가 전부 필터로 걸러졌지만 API 전체 결과 수는 더 많다면
+                    # 성급하게 0으로 판정하지 않도록 딱 다음 한 페이지만 더 확인한다.
+                    try:
+                        words, total = fetch_dictionary(
+                            dictionary, variant, 2, page_size, filters,
+                            request_timeout=request_timeout, attempts=attempts,
+                        )
+                    except ApiError as exc:
+                        if "Invalid start value" not in str(exc):
+                            warnings.append(str(exc))
                 if words:
-                    # 필터를 통과한 항목이 확인되면 원 API의 시작 일치 결과 수를 표시한다.
-                    total_count += total
+                    variant_has_word = True
                     if not exact:
-                        return total_count, list(dict.fromkeys(warnings))
+                        # 빠른 경로: 이어갈 단어가 하나라도 확인되면 즉시 종료한다.
+                        return total_count + total, list(dict.fromkeys(warnings))
+                    # 근사치: 같은 음절을 두 사전에서 더하면 겹치는 단어가 이중 계산된다
+                    # (우리말샘이 표준국어대사전을 대부분 포함). 정확한 단어 목록이 없어
+                    # 사전 간에는 max로만 합친다. 서로 다른 두음 변형(연 vs 련)은
+                    # 겹치지 않으므로 변형끼리는 그대로 더한다.
+                    variant_total = max(variant_total, total)
             except ApiError as exc:
                 warnings.append(str(exc))
+        if exact and variant_has_word:
+            total_count += variant_total
     return total_count, list(dict.fromkeys(warnings))
-
-
-def starting_total(dictionaries: list[str], query: str, filters: Filters) -> tuple[int, list[str]]:
-    """시작 검색의 전체 개수를 가볍게 조회한다."""
-    total, warnings = 0, []
-    for dictionary in dictionaries:
-        try:
-            _words, dictionary_total = fetch_dictionary(dictionary, query, 1, API_PAGE_SIZE, filters)
-            total += dictionary_total
-        except ApiError as exc:
-            warnings.append(str(exc))
-    return total, list(dict.fromkeys(warnings))
 
 
 def analyse_words(
@@ -669,26 +689,6 @@ def candidate_priority(word: dict) -> tuple[int, int, str]:
     return (0 if last in RARE_FINALS else 1, len(word["word"]), word["word"])
 
 
-def one_shot_page(dictionaries: list[str], candidates: list[dict], filters: Filters, dueum: bool, page: int) -> tuple[list[dict], list[dict], bool, list[str]]:
-    ordered = sorted(candidates, key=candidate_priority)
-    needed = page * PAGE_SIZE
-    analysed: list[dict] = []
-    one_shots: list[dict] = []
-    warnings: list[str] = []
-    for start in range(0, min(len(ordered), ONE_SHOT_ANALYSIS_LIMIT), ONE_SHOT_CHUNK_SIZE):
-        chunk = ordered[start:start + ONE_SHOT_CHUNK_SIZE]
-        checked, notes = analyse_words(dictionaries, chunk, filters, dueum, exact_counts=False)
-        analysed.extend(checked)
-        warnings.extend(notes)
-        one_shots.extend(word for word in checked if word["is_one_shot"])
-        if len(one_shots) >= needed:
-            break
-    start, end = (page - 1) * PAGE_SIZE, page * PAGE_SIZE
-    reached_limit = len(analysed) >= min(len(ordered), ONE_SHOT_ANALYSIS_LIMIT)
-    has_more = end < len(one_shots) or (len(one_shots) < needed and not reached_limit)
-    return analysed, one_shots[start:end], has_more, warnings
-
-
 def paged_search(dictionaries: list[str], query: str, filters: Filters, page: int) -> tuple[list[dict], int, list[str]]:
     """화면에 필요한 한 페이지만 가져와 첫 응답 시간을 제한한다."""
     merged: dict[str, dict] = {}
@@ -740,6 +740,48 @@ def paged_search_with_dueum(dictionaries: list[str], query: str, filters: Filter
     return list(merged.values()), total, list(dict.fromkeys(warnings))
 
 
+def gather_one_shot_words(dictionaries: list[str], query: str, filters: Filters, dueum: bool) -> tuple[list[dict], int, list[str]]:
+    """한방단어 모드의 '확정된 한방단어 전체 목록'을 한 번에 모은다.
+
+    시작 검색 + 희귀 끝글자 역검색 + 접두 확장 + 한방 판정을 모두 거친
+    결과를 (한방단어 목록, 시작 단어 총계, 경고)로 돌려준다. 페이지와
+    무관한 값이므로 (검색어, 사전들, 필터, 두음)으로 캐시하고, 라우트는
+    이 목록을 페이지 크기로 잘라서 보여 준다. 더 이상 빈 페이지 반복 없음.
+    """
+    cache_key = ("one_shot_full", query, tuple(dictionaries), filters.key(), dueum)
+    cached = cache.get(cache_key)
+    if cached is not None:
+        return copy.deepcopy(cached)
+
+    candidates, starting_total, warnings = paged_search_with_dueum(dictionaries, query, filters, 1, dueum)
+    if starting_total > PAGE_SIZE:
+        # 결과가 한 화면보다 많을 때만 얕은 역검색으로 뒤쪽의 희귀 후보를 보강한다.
+        rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters, deep=False)
+        warnings.extend(rare_warnings)
+        for word in rare_candidates:
+            if not any(existing["word"] == word["word"] for existing in candidates):
+                candidates.append(word)
+        expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
+        warnings.extend(expanded_warnings)
+        for word in expanded_candidates:
+            if not any(existing["word"] == word["word"] for existing in candidates):
+                candidates.append(word)
+
+    analysed, notes = analyse_words(
+        dictionaries,
+        sorted(candidates, key=candidate_priority),
+        filters,
+        dueum,
+        exact_counts=False,
+        fast_all_counts=True,
+    )
+    warnings.extend(notes)
+    one_shots = [word for word in analysed if word["is_one_shot"]]
+    result = (one_shots, starting_total, list(dict.fromkeys(warnings)))
+    cache.set(cache_key, result)
+    return copy.deepcopy(result)
+
+
 @app.get("/")
 def index():
     return render_template("index.html")
@@ -775,7 +817,7 @@ def prevent_api_cache(response):
 
 @app.get("/api/health")
 def health():
-    return jsonify(status="ok", dictionaries={key: bool(os.getenv(value["key_env"])) for key, value in DICTIONARIES.items()})
+    return jsonify(status="ok", dictionaries={key: bool(os.getenv(value["key_env"], "").strip()) for key, value in DICTIONARIES.items()})
 
 
 @app.get("/api/search")
@@ -789,44 +831,24 @@ def search():
         sort = request.args.get("sort", "alphabet")
         if sort not in {"alphabet", "short", "long", "next", "one-shot"}:
             raise ValueError("올바른 정렬 기준을 선택해 주세요.")
-        page = max(1, int(request.args.get("page", 1)))
-        filters = Filters(**{name: as_bool(name) for name in Filters.__annotations__})
+        try:
+            page = max(1, int(request.args.get("page", 1)))
+        except (ValueError, TypeError):
+            page = 1
+        # 필터 기본값은 화면(index.html) 체크 상태와 맞춘다. 그래야 주소창에서
+        # 바로 /api/search?query=기&dictionary=stdict 를 불러도 화면과 같은
+        # 결과가 나온다. 화면 기본: 한 글자 포함만 꺼짐, 나머지는 켜짐.
+        filters = Filters(**{name: as_bool(name, FILTER_UI_DEFAULTS.get(name, False)) for name in Filters.__annotations__})
         dueum = as_bool("dueum", True)
         broad_sort = sort in {"one-shot", "next"} or mode == "one-shot"
         if mode == "one-shot":
-            # 현재 화면 후보는 끝글자 종류와 무관하게 모두 후속 단어를
-            # 확인한다. 고정 희귀 목록에 없는 '녘' 같은 한방 끝글자도 이
-            # 경로에서 빠지지 않는다.
-            candidates, raw_total, warnings = paged_search_with_dueum(
-                dictionaries, query, filters, page, dueum,
-            )
-            if page == 1 and raw_total > PAGE_SIZE:
-                # 결과가 한 화면보다 많을 때만 얕은 역검색으로 뒤쪽의 희귀
-                # 후보를 보강한다. 작은 검색은 불필요한 API 호출을 하지 않는다.
-                rare_candidates, rare_warnings = rare_final_candidates(
-                    dictionaries, query, filters, deep=False,
-                )
-                warnings.extend(rare_warnings)
-                for word in rare_candidates:
-                    if not any(existing["word"] == word["word"] for existing in candidates):
-                        candidates.append(word)
-                expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
-                warnings.extend(expanded_warnings)
-                for word in expanded_candidates:
-                    if not any(existing["word"] == word["word"] for existing in candidates):
-                        candidates.append(word)
-                raw_total = max(raw_total, len(candidates))
-            analysed, notes = analyse_words(
-                dictionaries,
-                sorted(candidates, key=candidate_priority),
-                filters,
-                dueum,
-                exact_counts=False,
-                fast_all_counts=True,
-            )
-            warnings.extend(notes)
-            visible = order_words([word for word in analysed if word["is_one_shot"]], sort)[:PAGE_SIZE]
-            has_more = len([word for word in analysed if word["is_one_shot"]]) > PAGE_SIZE or page * PAGE_SIZE < raw_total
+            # 페이지 1에서 한방단어 전체 목록을 모아 캐시하고, 이후 페이지는
+            # 그 목록을 잘라서 보여 준다. 빈 페이지 무한 반복이 사라진다.
+            full_list, raw_total, warnings = gather_one_shot_words(dictionaries, query, filters, dueum)
+            analysed = full_list
+            start_index, end_index = (page - 1) * PAGE_SIZE, page * PAGE_SIZE
+            visible = order_words(full_list, sort)[start_index:end_index]
+            has_more = end_index < len(full_list)
         elif broad_sort:
             candidates, raw_total, warnings = paged_search_with_dueum(dictionaries, query, filters, page, dueum)
             if sort == "one-shot" or (sort == "next" and page == 1):
@@ -883,7 +905,13 @@ def search():
                 )
                 warnings.extend(count_notes)
                 visible = order_words(analysed, sort)
-                has_more = len(visible_pool) > PAGE_SIZE or page * PAGE_SIZE < raw_total
+                if sort == "one-shot":
+                    # '한방단어 우선' 정렬은 시작 단어 전체 수(raw_total, 수천)로
+                    # has_more를 부풀리지 않는다. 이번에 분석한 후보가 한 페이지를
+                    # 넘칠 때만 다음 페이지를 제안한다.
+                    has_more = len(visible_pool) > PAGE_SIZE
+                else:
+                    has_more = len(visible_pool) > PAGE_SIZE or page * PAGE_SIZE < raw_total
         else:
             candidates, raw_total, warnings = paged_search_with_dueum(dictionaries, query, filters, page, dueum)
             analysed, notes = analyse_words(
@@ -911,8 +939,17 @@ def search():
     except Exception:
         # 예기치 않은 오류에도 HTML 오류 문서 대신 프런트가 읽을 수 있는
         # JSON 계약을 유지한다. 내부 예외나 요청 정보는 응답에 노출하지 않는다.
+        # 서버 로그에는 추적을 남기되 검색어/키는 절대 기록하지 않는다.
+        logger.exception("search failed")
         return jsonify(error="검색 처리 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."), 500
 
 
 if __name__ == "__main__":
-    app.run(debug=os.getenv("FLASK_DEBUG", "false").lower() == "true")
+    # 이 경로는 로컬 개발 전용이다. 운영 배포는 gunicorn(render.yaml)이
+    # app:app 을 직접 실행하므로 이 블록을 절대 거치지 않는다.
+    # FLASK_DEBUG=true 는 운영에서 켜지 않는다(FLASK_ENV=production 이면 무시).
+    debug_enabled = (
+        os.getenv("FLASK_DEBUG", "false").lower() == "true"
+        and os.getenv("FLASK_ENV") != "production"
+    )
+    app.run(debug=debug_enabled)
