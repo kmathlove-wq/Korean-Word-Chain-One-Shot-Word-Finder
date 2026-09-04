@@ -3,7 +3,10 @@ services:
     name: word-chain-one-shot-search
     runtime: python
     buildCommand: pip install -r requirements.txt
-    startCommand: gunicorn app:app --workers 2 --threads 4 --timeout 60
+    # 작업은 대부분 국립국어원 API 응답 대기(I/O)라 프로세스를 1개만 두고
+    # 스레드를 늘린다. 그래야 메모리 캐시(TTLCache)와 연결 풀, /api/warm 예열이
+    # 모든 요청에서 공유된다. 무료 플랜 CPU가 작아 프로세스를 늘려도 이득이 적다.
+    startCommand: gunicorn app:app --workers 1 --threads 8 --timeout 60
     healthCheckPath: /api/health
     envVars:
       - key: STDICT_API_KEY

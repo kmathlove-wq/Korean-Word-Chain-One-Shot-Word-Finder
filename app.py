@@ -50,8 +50,9 @@ CACHE_TTL = 60 * 30
 REQUEST_TIMEOUT = (10, 20)
 REQUEST_ATTEMPTS = 2
 # 서로 독립적인 끝 글자 조회를 한꺼번에 처리하는 최대 개수. 대부분 네트워크
-# 대기(소켓)라 GIL 영향이 적어 스레드를 넉넉히 둔다. 아래 _http 연결 풀 크기와 맞춘다.
-LOOKUP_WORKERS = 36
+# 대기(소켓)라 GIL 영향이 적다. 무료 플랜 메모리(512MB)와 동시 요청을 고려해
+# 넉넉하되 과하지 않게 둔다. 아래 _http 연결 풀 크기와 맞춘다.
+LOOKUP_WORKERS = 24
 RARE_FINALS = {
     "튬", "듐", "륨", "슘", "븀", "늄", "뮴", "윰", "쥼", "줌",
     "릇", "릎", "릉", "쁨", "쯤", "낌", "깡", "꽝", "쩡", "슛",
@@ -114,7 +115,7 @@ cache = TTLCache()
 
 # 국립국어원 서버에 매번 새로 접속(TLS 악수)하지 않고 연결을 재사용한다.
 _http = requests.Session()
-_http_adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=48, max_retries=0)
+_http_adapter = requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=32, max_retries=0)
 _http.mount("https://", _http_adapter)
 _http.mount("http://", _http_adapter)
 

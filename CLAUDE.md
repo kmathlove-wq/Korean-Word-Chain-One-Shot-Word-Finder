@@ -68,15 +68,16 @@ OPENDICT_API_KEY=우리말샘_키
 - 표준국어대사전은 `https://stdict.korean.go.kr/api/search.do`, 우리말샘은 `https://opendict.korean.go.kr/api/search`를 사용한다.
 - JSON 응답을 우선 처리하고 JSON이 아니면 `xml.etree.ElementTree`로 XML을 파싱한다.
 - 검색 방식은 `type_search=search`, `method=start`인 시작 일치 검색이다.
-- 요청 제한 시간은 연결 10초/응답 20초이며 실패 시 한 번 재시도한다. 빠른 조회 경로는 연결 2초/응답 3초·1회다.
+- 요청 제한 시간은 연결 10초/응답 20초이며 실패 시 한 번 재시도한다. 빠른 조회 경로는 연결 2초/응답 3초·1회(`patient_retry` 재시도는 `PATIENT_FAST_TIMEOUT` 3초/6초).
+- 운영 서버는 `gunicorn --workers 1 --threads 8`로 실행한다(`render.yaml`). 작업이 대부분 API 대기라 프로세스 1개로 메모리 캐시·연결 풀·`/api/warm` 예열을 모든 요청이 공유한다.
 - 국립국어원 서버 연결은 공유 `requests.Session`(`_http`)으로 재사용한다. `fetch_dictionary()`는 `_http.get`을 쓴다.
-- 독립적인 끝 글자·희귀후보 조회는 `LOOKUP_WORKERS`(36)개 작업자로 병렬 처리한다(`_http` 연결 풀 크기와 맞춘다). `fast_continuation_counts()`가 실패분을 1회 재시도하며 `patient_retry`면 재시도는 긴 제한 시간(`PATIENT_FAST_TIMEOUT`)으로 한다. `analyse_words()` 빠른 경로와 `/api/continuations`가 이 함수를 공유한다.
+- 독립적인 끝 글자·희귀후보 조회는 `LOOKUP_WORKERS`(24)개 작업자로 병렬 처리한다(`_http` 연결 풀 크기와 맞춘다). `fast_continuation_counts()`가 실패분을 1회 재시도하며 `patient_retry`면 재시도는 긴 제한 시간(`PATIENT_FAST_TIMEOUT`)으로 한다. `analyse_words()` 빠른 경로와 `/api/continuations`가 이 함수를 공유한다.
 - 두 단계 로딩(`defer_counts=1`, `next`·`one-shot` 정렬 제외):
   - `words`/`all` 모드: `search()`가 `describe_words_without_counts()`로 단어 목록만(`deferred=true`, `next_word_count=null`) 먼저 돌려주고, 화면이 `/api/continuations`로 숫자·한방 표시를 채운다.
   - `one-shot` 모드: `gather_one_shot_first_phase()`가 후보를 모아 희귀 끝글자(`RARE_FINALS`) 후보만 빠르게 판정해 확정 한방단어 + 나머지 후보(`one_shot_pending=true`, `is_one_shot=null`)를 돌려준다. 화면이 `/api/continuations`로 나머지를 확인해 한방이 아닌 후보 카드를 지운다. `defer_counts` 없으면 예전처럼 `gather_one_shot_words()`가 전체를 한 번에 캐시·판정한다.
 - 화면 페이지 크기는 24개, 공식 API 묶음 크기는 100개다.
 - 필터로 앞쪽 결과가 모두 제거될 수 있으므로 `paged_search()`는 필요한 결과가 모일 때까지 최대 `MAX_API_SCAN`(10)묶음 × 100개 ≈ 1000개 범위에서 다음 묶음을 확인한다.
-- 메모리 `TTLCache`의 기본 만료 시간은 30분이다. 서버 재시작 시 사라지며 프로세스 간 공유되지 않는다. `fetch_dictionary()`는 캐시 원본 오염을 막으려고 항상 `copy.deepcopy`한 복사본을 돌려준다.
+- 메모리 `TTLCache`의 기본 만료 시간은 30분이다. 서버 재시작 시 사라진다(단일 프로세스라 모든 스레드가 공유). `fetch_dictionary()`는 캐시 원본 오염을 막으려고 항상 `copy.deepcopy`한 복사본을 돌려준다.
 - 화면에서는 표준국어대사전 또는 우리말샘 중 하나만 선택해 검색한다.
 - 한방단어 모드(`mode=one-shot`)는 `gather_one_shot_words()`가 전체 한방단어 목록을 한 번 모아 `(검색어, 사전, 필터, 두음)` 키로 캐시하고, 라우트는 그 목록을 페이지 크기로 자른다. 페이지 2 이상도 빈 결과 없이 정확히 동작한다.
 
