@@ -242,4 +242,7 @@ grid.addEventListener('click', async event => { const button = event.target.clos
 
 // 페이지를 여는 동안 한방단어 검색용 '희귀 끝글자' 캐시를 서버에서 미리 데운다.
 // 사용자가 단어를 입력하는 사이에 준비돼 첫 한방단어 검색이 빨라진다.
-fetch('/api/warm', {cache: 'no-store'}).catch(() => {});
+// 운영 서버는 프로세스가 여럿이라 캐시가 프로세스별이므로 몇 번 나눠 부른다.
+const warmUp = () => fetch('/api/warm', {cache: 'no-store'}).catch(() => {});
+warmUp();
+[1500, 4000].forEach(delay => setTimeout(warmUp, delay));
