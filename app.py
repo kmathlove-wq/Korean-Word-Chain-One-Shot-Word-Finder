@@ -899,6 +899,38 @@ def health():
     return jsonify(status="ok", dictionaries={key: bool(os.getenv(value["key_env"], "").strip()) for key, value in DICTIONARIES.items()})
 
 
+_warm_lock = threading.Lock()
+_last_warm = 0.0
+
+
+def _warm_rare_caches() -> None:
+    """희귀 끝글자 '끝일치' 검색 결과를 미리 받아 캐시에 채운다.
+
+    이 결과는 검색어와 무관하므로(모든 '…륨' 단어 목록 등) 첫 한방단어
+    검색이 이 캐시를 재사용해 훨씬 빨라진다. 화면이 페이지를 열 때 한 번
+    부른다. 이미 최근에 데웠으면 건너뛴다.
+    """
+    global _last_warm
+    with _warm_lock:
+        if time.monotonic() - _last_warm < CACHE_TTL / 2:
+            return
+        _last_warm = time.monotonic()
+    filters = Filters(**FILTER_UI_DEFAULTS)
+    for dictionary in DICTIONARIES:
+        if not os.getenv(DICTIONARIES[dictionary]["key_env"], "").strip():
+            continue
+        try:
+            rare_final_candidates([dictionary], "￿", filters, deep=False)
+        except Exception:
+            logger.exception("cache warm failed")
+
+
+@app.get("/api/warm")
+def warm():
+    threading.Thread(target=_warm_rare_caches, daemon=True).start()
+    return jsonify(warming=True)
+
+
 @app.get("/api/search")
 def search():
     try:

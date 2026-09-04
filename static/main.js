@@ -239,3 +239,7 @@ moreButton.addEventListener('click', () => search(state.page + 1, true));
 moreTopButton.addEventListener('click', () => search(state.page + 1, true));
 sortSelect.addEventListener('change', () => { if (state.words.length) search(); });
 grid.addEventListener('click', async event => { const button = event.target.closest('[data-copy]'); if (!button) return; try { await navigator.clipboard.writeText(button.dataset.copy); button.textContent = '복사됨'; setTimeout(() => button.textContent = '복사', 1200); } catch { showMessage('클립보드에 복사하지 못했습니다.'); } });
+
+// 페이지를 여는 동안 한방단어 검색용 '희귀 끝글자' 캐시를 서버에서 미리 데운다.
+// 사용자가 단어를 입력하는 사이에 준비돼 첫 한방단어 검색이 빨라진다.
+fetch('/api/warm', {cache: 'no-store'}).catch(() => {});

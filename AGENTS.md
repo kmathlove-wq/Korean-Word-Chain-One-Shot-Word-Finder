@@ -56,6 +56,7 @@ OPENDICT_API_KEY=우리말샘_키
 | `GET /api/health` | 서버 상태와 사전별 키 설정 여부 반환 |
 | `GET /api/search` | 시작 단어 검색, 필터, 한방 판정, 페이지 응답 |
 | `GET /api/continuations` | 끝 글자 목록의 이어갈 단어 수만 병렬로 계산해 `{counts:{글자:{count,available,one_shot}}}` 반환 |
+| `GET /api/warm` | 희귀 끝글자 '끝일치' 캐시를 백그라운드 스레드로 데우고 즉시 `{warming:true}` 반환. 화면이 페이지 열 때 1회 호출 |
 
 `dictionary`은 `stdict`, `opendict`, `mode`는 `all`, `words`, `one-shot`을 허용한다. 검색 필터는 `Filters` 데이터 클래스와 쿼리 매개변수 이름을 일치시킨다.
 

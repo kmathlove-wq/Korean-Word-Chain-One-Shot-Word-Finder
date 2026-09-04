@@ -1,4 +1,5 @@
 import json
+import time
 import unittest
 from unittest.mock import patch
 
@@ -627,6 +628,19 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(by_word["리본"]["one_shot_pending"])
         # 1단계에서는 희귀 끝글자만 판정한다("튬"만, "본"은 화면이 이어서 확인).
         self.assertEqual([c.args[1] for c in count.call_args_list], ["튬"])
+
+    def test_warm_route_returns_warming_status(self):
+        response = app.app.test_client().get("/api/warm")
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json["warming"])
+
+    def test_warm_probes_rare_finals_when_keys_present(self):
+        app._last_warm = 0.0
+        with patch.object(app.os, "getenv", return_value="fake-key"), \
+             patch.object(app, "rare_final_candidates", return_value=([], [])) as rare:
+            app._warm_rare_caches()
+        self.assertTrue(rare.called)
+        self.assertEqual([call.kwargs.get("deep") for call in rare.call_args_list], [False, False])
 
     def test_one_shot_mode_without_defer_still_returns_full_list(self):
         lithium = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")

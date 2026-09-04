@@ -58,6 +58,7 @@ OPENDICT_API_KEY=우리말샘_키
 | `GET /api/health` | 서버 상태와 사전별 키 설정 여부 반환 |
 | `GET /api/search` | 시작 단어 검색, 필터, 한방 판정, 페이지 응답 |
 | `GET /api/continuations` | 끝 글자 목록의 이어갈 단어 수만 병렬 계산 (`syllables=릉,강,…`) |
+| `GET /api/warm` | 희귀 끝글자 '끝일치' 캐시를 백그라운드로 미리 데움(즉시 응답). 화면이 페이지 열 때 1회 호출 |
 
 `/api/search`의 주요 매개변수는 `query`, `dictionary`, `mode`, `page`, `noun_only`, `include_proper`, `include_north`, `include_dialect`, `include_old`, `include_technical`, `include_single`, `dueum`, `defer_counts`이다. `dictionary` 값은 `stdict`, `opendict` 중 하나다. `mode` 값은 `all`, `words`, `one-shot` 중 하나다. 필터 매개변수를 생략하면 화면 체크박스 기본값(`FILTER_UI_DEFAULTS`: 한 글자 포함만 꺼짐, 나머지 켜짐, 두음 켜짐)을 따른다. `page`에 숫자가 아닌 값이 오면 1로 처리한다.
 

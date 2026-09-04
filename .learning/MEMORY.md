@@ -7,5 +7,8 @@
 - 두음 한방 판정은 `continuation_count()`에서만 역방향(`dueum_reverse_variants`)까지 확인. 단어 목록 경로(`paged_search_with_dueum`)는 건드리지 않는다.
 - 우리말샘은 옛말의 옛한글을 사용자 지정 영역(PUA, 예: U+E451) 코드로 준다. 표준 글꼴에 그림이 없어 네모(□)로 보인다. 사용자 결정(2026-09-04): 표기는 그대로 두고 `main.js`의 `ARCHAIC_HANGUL` 정규식으로 찾아 카드에 안내 문구만 붙인다. 지우거나 변환하지 않는다.
 - 첫 검색이 느린 원인(측정): 단어 목록은 2~3초면 오지만 카드마다 '이어갈 단어 수'를 세느라 국립국어원에 수십 번 물어봄. 캐시가 차면 0.3초.
-- 두 단계 로딩: 가나다·짧은·긴 순은 `defer_counts=1` → `search()`가 `describe_words_without_counts()`로 단어만 먼저(`deferred=true`), 화면 `fillDeferredCounts()`가 `GET /api/continuations`로 숫자·한방 뱃지를 채움. `next`·`one-shot` 정렬과 `mode=one-shot`은 예전대로 한 번에.
-- 끝 글자 병렬 조회는 `fast_continuation_counts()` 하나로 통일(= `analyse_words` 빠른 경로 + `/api/continuations` 공유). 작업자 수 `LOOKUP_WORKERS`(20), 연결은 공유 `_http = requests.Session()` 재사용.
+- 두 단계 로딩(`defer_counts=1`, `next`·`one-shot` 정렬만 제외):
+  - `words`/`all`: `search()`가 `describe_words_without_counts()`로 목록만 먼저(`deferred=true`), 화면 `fillDeferredCounts()`가 `GET /api/continuations`로 숫자·한방 뱃지를 채움.
+  - `one-shot` 모드: `gather_one_shot_first_phase()`가 후보를 모아 `RARE_FINALS` 끝글자만 빠르게 판정(확정) + 나머지 후보(`one_shot_pending=true`)를 반환. 화면이 2단계로 나머지 확인 후 한방 아닌 카드 제거. `defer_counts` 없으면 `gather_one_shot_words()` 전체 캐시 경로 그대로.
+- 끝 글자 병렬 조회는 `fast_continuation_counts()`로 통일(= `analyse_words` 빠른 경로 + `/api/continuations` 공유). `patient_retry`면 재시도를 `PATIENT_FAST_TIMEOUT(3,8)`로. `LOOKUP_WORKERS=36`(= `_http` 풀 크기), `rare_final_candidates`/`prefix_expansion_candidates`도 같은 작업자 수. 연결은 공유 `_http = requests.Session()`.
+- 측정(2026-09-04 배포): "시작하는 단어" 첫 화면 ~2초(전 18초). "한방단어" 모드는 국립국어원 API가 느릴 때 2단계에서 여전히 오래 걸릴 수 있으나 1단계 후보는 빨리 뜬다. NIKL 지연은 대체로 일시적이라 재시도로 회복.
