@@ -98,7 +98,7 @@ OPENDICT_API_KEY=우리말샘_키
 - `state.params`를 이용한 다음 페이지 요청을 유지한다.
 - 오류가 발생해도 `finally`에서 로딩을 숨긴다.
 - 검색 요청 중 기존 결과를 잘못 누적하지 않는다. `searchSeq`로 오래된 응답이 새 응답을 덮어쓰지 않게 막는다. `fillDeferredCounts()`도 `mySeq` 불일치 시 조용히 멈춘다.
-- `data.deferred`면 `fillDeferredCounts()`가 `/api/continuations`로 이어갈 단어 수·한방 표시를 채우고 다시 그린다. 그동안 카드는 "확인 중…"으로 표시한다.
+- `data.deferred`면 `fillDeferredCounts()`가 끝 글자를 8개씩 잘게 나눠 `/api/continuations`를 병렬 호출해 채우고, 실패분만 backoff(0·1.5·3·5초)로 다시 확인한다. 한 요청이 운영 서버 제한 시간에 걸리지 않도록 잘게 나눈다. 그동안 카드는 "확인 중…"으로 표시한다.
 - `ARCHAIC_HANGUL` 정규식에 걸리는 낱말(옛한글 낱자모·확장·PUA)은 카드에 안내 문구를 붙인다. 표기는 그대로 두고 지우지 않는다.
 - 경고(`data.warnings`)는 결과가 0개여도 표시한다(경고 문구 먼저).
 - 정렬 `select` 변경은 서버에 새 요청을 보낸다. 브라우저 `sortedWords()`는 보조 정리용이다.

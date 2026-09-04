@@ -134,22 +134,31 @@ function prefetchNextPage() {
   };
 }
 
-// 2단계: 단어 목록을 그린 뒤, 아직 비어 있는 '이어갈 단어 수'와 한방단어 표시를
-// 끝 글자별로 한꺼번에 물어 채운다. 국립국어원 응답이 가끔 지연되므로 실패한
-// 끝 글자는 한 번 더 확인한다. 검색이 새로 시작되면(mySeq 불일치) 조용히 멈춘다.
+// 2단계: 목록을 그린 뒤, 아직 비어 있는 '이어갈 단어 수'와 한방단어 표시를 채운다.
+// 끝 글자를 8개씩 잘게 나눠 /api/continuations 를 병렬로 부른다(한 요청이 운영
+// 서버 제한 시간에 걸리지 않도록). 국립국어원 응답이 지연되면 실패분만 다시 확인한다.
+// 검색이 새로 시작되면(mySeq 불일치) 조용히 멈춘다.
 async function fillDeferredCounts(mySeq, searchKey) {
   const source = new URLSearchParams(searchKey);
   const oneShotMode = source.get('mode') === 'one-shot';
   const filterNames = ['noun_only','include_proper','include_north','include_dialect','include_old','include_technical','include_single','dueum'];
 
-  const fetchCounts = async syllables => {
+  const fetchChunk = async syllables => {
     const params = new URLSearchParams({dictionary: source.get('dictionary'), syllables: syllables.join(',')});
     filterNames.forEach(name => { if (source.has(name)) params.set(name, source.get(name)); });
     try {
       const response = await fetch(`/api/continuations?${params}`, {cache: 'no-store'});
+      if (!response.ok) return {};
       const body = await response.json().catch(() => null);
       return body?.counts || {};
     } catch { return {}; }
+  };
+
+  const fetchAll = async syllables => {
+    const chunks = [];
+    for (let i = 0; i < syllables.length; i += 8) chunks.push(syllables.slice(i, i + 8));
+    const results = await Promise.all(chunks.map(fetchChunk));
+    return Object.assign({}, ...results);
   };
 
   const applyAndRender = counts => {
@@ -169,16 +178,18 @@ async function fillDeferredCounts(mySeq, searchKey) {
     }
   };
 
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const waits = [0, 1500, 3000, 5000];
+  for (let attempt = 0; attempt < waits.length; attempt++) {
     const pending = [...new Set(state.words.filter(w => w.next_word_count == null && w.last_syllable).map(w => w.last_syllable))];
     if (!pending.length) break;
-    if (attempt > 0) await wait(1200);
-    const counts = await fetchCounts(pending);
+    if (waits[attempt]) await wait(waits[attempt]);
+    if (mySeq !== searchSeq) return;
+    const counts = await fetchAll(pending);
     if (mySeq !== searchSeq) return;
     applyAndRender(counts);
   }
   if (oneShotMode) {
-    // 두 번 시도해도 확인 못 한 후보는 한방단어라고 단정하지 않고 뺀다.
+    // 여러 번 시도해도 확인 못 한 후보는 한방단어라고 단정하지 않고 뺀다.
     state.words = state.words.filter(w => !w.one_shot_pending || w.is_one_shot === true);
   } else {
     // 일반 목록: 못 채운 끝 글자는 '확인 실패'로 표시한다.

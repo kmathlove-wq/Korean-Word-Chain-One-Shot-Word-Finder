@@ -42,8 +42,9 @@ ONE_SHOT_ANALYSIS_LIMIT = 80
 FAST_CONTINUATION_PAGE_SIZE = API_PAGE_SIZE
 FAST_REQUEST_TIMEOUT = (2, 3)
 # 빠른 경로 재시도용. 공식 API가 지연될 때 첫 조회(3초)에서 놓친 끝 글자를
-# 조금 더 기다려 받아 낸다.
-PATIENT_FAST_TIMEOUT = (3, 8)
+# 조금 더 기다려 받아 낸다. 운영 서버 제한 시간(gunicorn 60초)을 넘기지 않도록
+# 한 요청이 다루는 글자 수는 화면에서 잘게 나눈다.
+PATIENT_FAST_TIMEOUT = (3, 6)
 MAX_QUERY_LENGTH = 20
 CACHE_TTL = 60 * 30
 REQUEST_TIMEOUT = (10, 20)
