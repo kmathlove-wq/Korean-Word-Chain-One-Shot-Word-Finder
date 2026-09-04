@@ -132,34 +132,48 @@ function prefetchNextPage() {
 }
 
 // 2단계: 단어 목록을 그린 뒤, 아직 비어 있는 '이어갈 단어 수'와 한방단어 표시를
-// 끝 글자별로 한꺼번에 물어 채운다. 검색이 새로 시작되면(mySeq 불일치) 조용히 멈춘다.
+// 끝 글자별로 한꺼번에 물어 채운다. 국립국어원 응답이 가끔 지연되므로 실패한
+// 끝 글자는 한 번 더 확인한다. 검색이 새로 시작되면(mySeq 불일치) 조용히 멈춘다.
 async function fillDeferredCounts(mySeq, searchKey) {
   const source = new URLSearchParams(searchKey);
-  const pending = [...new Set(state.words.filter(w => w.next_word_count == null && w.last_syllable).map(w => w.last_syllable))];
-  if (!pending.length) return;
-  const params = new URLSearchParams({dictionary: source.get('dictionary'), syllables: pending.join(',')});
-  ['noun_only','include_proper','include_north','include_dialect','include_old','include_technical','include_single','dueum'].forEach(name => { if (source.has(name)) params.set(name, source.get(name)); });
-  let counts = {};
-  try {
-    const response = await fetch(`/api/continuations?${params}`, {cache: 'no-store'});
-    const body = await response.json().catch(() => null);
-    counts = body?.counts || {};
-  } catch { /* 아래에서 '확인 실패'로 표시된다 */ }
-  if (mySeq !== searchSeq) return;
-  state.words.forEach(w => {
-    const info = counts[w.last_syllable];
-    if (info) {
-      w.next_word_count = info.count;
-      w.is_one_shot = info.one_shot;
-      w.count_available = info.available;
-    } else if (w.next_word_count == null) {
-      w.count_available = false;
+  const filterNames = ['noun_only','include_proper','include_north','include_dialect','include_old','include_technical','include_single','dueum'];
+
+  const fetchCounts = async syllables => {
+    const params = new URLSearchParams({dictionary: source.get('dictionary'), syllables: syllables.join(',')});
+    filterNames.forEach(name => { if (source.has(name)) params.set(name, source.get(name)); });
+    try {
+      const response = await fetch(`/api/continuations?${params}`, {cache: 'no-store'});
+      const body = await response.json().catch(() => null);
+      return body?.counts || {};
+    } catch { return {}; }
+  };
+
+  const applyAndRender = counts => {
+    state.words.forEach(w => {
+      const info = counts[w.last_syllable];
+      if (info && info.available) {
+        w.next_word_count = info.count;
+        w.is_one_shot = info.one_shot;
+        w.count_available = true;
+      }
+    });
+    if (state.lastData) {
+      state.lastData.one_shot_count = state.words.filter(w => w.is_one_shot).length;
+      render(state.lastData);
     }
-  });
-  if (state.lastData) {
-    state.lastData.one_shot_count = state.words.filter(w => w.is_one_shot).length;
-    render(state.lastData);
+  };
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const pending = [...new Set(state.words.filter(w => w.next_word_count == null && w.last_syllable).map(w => w.last_syllable))];
+    if (!pending.length) return;
+    if (attempt > 0) await wait(1200);
+    const counts = await fetchCounts(pending);
+    if (mySeq !== searchSeq) return;
+    applyAndRender(counts);
   }
+  // 두 번 시도 후에도 못 채운 끝 글자는 '확인 실패'로 표시한다.
+  state.words.forEach(w => { if (w.next_word_count == null) w.count_available = false; });
+  if (state.lastData) render(state.lastData);
 }
 
 async function search(page = 1, append = false) {
