@@ -41,13 +41,16 @@ RARE_CANDIDATE_LIMIT = 120
 ONE_SHOT_ANALYSIS_LIMIT = 80
 FAST_CONTINUATION_PAGE_SIZE = API_PAGE_SIZE
 FAST_REQUEST_TIMEOUT = (2, 3)
+# 빠른 경로 재시도용. 공식 API가 지연될 때 첫 조회(3초)에서 놓친 끝 글자를
+# 조금 더 기다려 받아 낸다.
+PATIENT_FAST_TIMEOUT = (3, 8)
 MAX_QUERY_LENGTH = 20
 CACHE_TTL = 60 * 30
 REQUEST_TIMEOUT = (10, 20)
 REQUEST_ATTEMPTS = 2
 # 서로 독립적인 끝 글자 조회를 한꺼번에 처리하는 최대 개수. 대부분 네트워크
-# 대기라 GIL 영향이 적다. 공식 API 부담을 고려해 적당한 값으로 둔다.
-LOOKUP_WORKERS = 20
+# 대기(소켓)라 GIL 영향이 적어 스레드를 넉넉히 둔다. 아래 _http 연결 풀 크기와 맞춘다.
+LOOKUP_WORKERS = 36
 RARE_FINALS = {
     "튬", "듐", "륨", "슘", "븀", "늄", "뮴", "윰", "쥼", "줌",
     "릇", "릎", "릉", "쁨", "쯤", "낌", "깡", "꽝", "쩡", "슛",
@@ -110,7 +113,7 @@ cache = TTLCache()
 
 # 국립국어원 서버에 매번 새로 접속(TLS 악수)하지 않고 연결을 재사용한다.
 _http = requests.Session()
-_http_adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=32, max_retries=0)
+_http_adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=48, max_retries=0)
 _http.mount("https://", _http_adapter)
 _http.mount("http://", _http_adapter)
 
@@ -453,7 +456,7 @@ def rare_final_candidates(
     def collect(jobs: list[tuple[str, str, str, int]]) -> bool:
         if not jobs:
             return False
-        with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as executor:
+        with ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(jobs))) as executor:
             futures = [executor.submit(probe, job) for job in dict.fromkeys(jobs)]
             for future in as_completed(futures):
                 words, notes = future.result()
@@ -528,7 +531,7 @@ def prefix_expansion_candidates(dictionaries: list[str], query: str, seeds: list
         for api_start in range(1, PREFIX_EXPANSION_SCAN_LIMIT + 1)
     ]
     if jobs:
-        with ThreadPoolExecutor(max_workers=min(8, len(jobs))) as executor:
+        with ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(jobs))) as executor:
             futures = [executor.submit(probe, job) for job in jobs]
             for future in as_completed(futures):
                 batch, notes = future.result()
@@ -546,7 +549,7 @@ def prefix_expansion_candidates(dictionaries: list[str], query: str, seeds: list
     return list(merged.values())[:RARE_CANDIDATE_LIMIT], list(dict.fromkeys(warnings))
 
 
-def continuation_count(dictionaries: list[str], syllable: str, filters: Filters, dueum: bool, exact: bool = True) -> tuple[int, list[str]]:
+def continuation_count(dictionaries: list[str], syllable: str, filters: Filters, dueum: bool, exact: bool = True, slow: bool = False) -> tuple[int, list[str]]:
     if dueum:
         # 두음법칙 허용 시: 원음 + 정방향 변환음 + 역방향(원래 소리)까지 모두 확인한다.
         variants = list(dict.fromkeys(
@@ -557,7 +560,8 @@ def continuation_count(dictionaries: list[str], syllable: str, filters: Filters,
     total_count = 0
     warnings = []
     page_size = API_PAGE_SIZE if exact else FAST_CONTINUATION_PAGE_SIZE
-    request_timeout = REQUEST_TIMEOUT if exact else FAST_REQUEST_TIMEOUT
+    # slow: 빠른 경로이되 지연된 공식 API에서도 값을 받아 내도록 조금 더 기다린다.
+    request_timeout = REQUEST_TIMEOUT if exact else (PATIENT_FAST_TIMEOUT if slow else FAST_REQUEST_TIMEOUT)
     attempts = REQUEST_ATTEMPTS if exact else 1
     for variant in variants:
         variant_total = 0
@@ -607,22 +611,23 @@ def fast_continuation_counts(
     syllables,
     filters: Filters,
     dueum: bool,
+    patient_retry: bool = False,
 ) -> tuple[dict[str, tuple[int, list[str]]], list[str]]:
     """여러 끝 글자의 '이어갈 단어 수'를 한꺼번에 병렬로 빠르게 확인한다.
 
-    각 값은 (개수, 경고목록) 꼴이다. 짧은 제한 시간에 실패한 글자는
-    한 번 더 병렬로 확인한다. 지연 중인 공식 API를 모두 반복 호출하면
-    성공 수는 늘지 않으면서 운영 서버 제한 시간에 가까워지므로 재시도는
-    8개로 제한한다.
+    각 값은 (개수, 경고목록) 꼴이다. 첫 조회는 짧은 제한 시간으로 빠르게 훑고,
+    실패한 글자는 한 번 더 병렬로 확인한다. `patient_retry`면 재시도는
+    긴 제한 시간(정확 조회)으로 해서 지연된 공식 API에서도 값을 받아 낸다.
+    운영 서버 제한 시간을 넘기지 않도록 재시도 대상은 12개로 제한한다.
     """
     unique = [syllable for syllable in dict.fromkeys(syllables) if syllable]
     counts: dict[str, tuple[int, list[str]]] = {}
     if not unique:
         return counts, []
 
-    def run(subset: list[str]) -> None:
+    def run(subset: list[str], slow: bool) -> None:
         with ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(subset))) as executor:
-            futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum, False): syllable for syllable in subset}
+            futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum, False, slow): syllable for syllable in subset}
             for future in as_completed(futures):
                 syllable = futures[future]
                 try:
@@ -630,10 +635,10 @@ def fast_continuation_counts(
                 except Exception:
                     counts[syllable] = (0, [f"'{syllable}' 이어갈 단어 수를 확인하지 못했습니다."])
 
-    run(unique)
-    retry_syllables = [syllable for syllable, (_count, notes) in counts.items() if notes][:8]
+    run(unique, False)
+    retry_syllables = [syllable for syllable, (_count, notes) in counts.items() if notes][:12]
     if retry_syllables:
-        run(retry_syllables)
+        run(retry_syllables, patient_retry)
     warnings: list[str] = []
     for _syllable, (_count, notes) in counts.items():
         warnings.extend(notes)
@@ -780,6 +785,40 @@ def paged_search_with_dueum(dictionaries: list[str], query: str, filters: Filter
     return list(merged.values()), total, list(dict.fromkeys(warnings))
 
 
+def gather_one_shot_candidates(dictionaries: list[str], query: str, filters: Filters, dueum: bool) -> tuple[list[dict], int, list[str]]:
+    """한방단어 후보 묶음만 모은다(판정 전). 시작 검색 + 희귀 끝글자 역검색 + 접두 확장."""
+    candidates, starting_total, warnings = paged_search_with_dueum(dictionaries, query, filters, 1, dueum)
+    if starting_total > PAGE_SIZE:
+        rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters, deep=False)
+        warnings.extend(rare_warnings)
+        for word in rare_candidates:
+            if not any(existing["word"] == word["word"] for existing in candidates):
+                candidates.append(word)
+        expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
+        warnings.extend(expanded_warnings)
+        for word in expanded_candidates:
+            if not any(existing["word"] == word["word"] for existing in candidates):
+                candidates.append(word)
+    return sorted(candidates, key=candidate_priority), starting_total, warnings
+
+
+def gather_one_shot_first_phase(dictionaries: list[str], query: str, filters: Filters, dueum: bool) -> tuple[list[dict], list[dict], int, list[str]]:
+    """한방단어 모드 1단계: 후보를 모아 '희귀 끝글자' 후보만 빠르게 판정한다.
+
+    (확정된 한방단어[희귀 끝글자], 아직 판정 안 된 후보[비희귀 끝글자, is_one_shot=None],
+    시작 단어 총계, 경고)를 돌려준다. 화면이 2단계에서 `/api/continuations`로
+    나머지 후보의 끝글자를 확인해 한방단어를 추가한다.
+    """
+    ordered, starting_total, warnings = gather_one_shot_candidates(dictionaries, query, filters, dueum)
+    rare_pool = [word for word in ordered if last_hangul_syllable(word["word"]) in RARE_FINALS]
+    other_pool = [word for word in ordered if last_hangul_syllable(word["word"]) not in RARE_FINALS]
+    analysed_rare, notes = analyse_words(dictionaries, rare_pool, filters, dueum, exact_counts=False, fast_all_counts=False)
+    warnings.extend(notes)
+    confirmed = [word for word in analysed_rare if word["is_one_shot"]]
+    pending = describe_words_without_counts(other_pool)
+    return confirmed, pending, starting_total, list(dict.fromkeys(warnings))
+
+
 def gather_one_shot_words(dictionaries: list[str], query: str, filters: Filters, dueum: bool) -> tuple[list[dict], int, list[str]]:
     """한방단어 모드의 '확정된 한방단어 전체 목록'을 한 번에 모은다.
 
@@ -881,12 +920,24 @@ def search():
         filters = Filters(**{name: as_bool(name, FILTER_UI_DEFAULTS.get(name, False)) for name in Filters.__annotations__})
         dueum = as_bool("dueum", True)
         broad_sort = sort in {"one-shot", "next"} or mode == "one-shot"
-        # 화면이 단어 목록을 먼저 그린 뒤 '이어갈 단어 수'를 뒤 단계(/api/continuations)에서
-        # 채우고 싶을 때 defer_counts=1 을 보낸다. 개수가 정렬에 필요한 경우(broad_sort)에는
-        # 무시한다. 이 값이 없으면 예전처럼 한 번에 모두 계산한다.
-        defer_counts = as_bool("defer_counts", False) and not broad_sort
+        # 화면이 목록을 먼저 그린 뒤 '이어갈 단어 수'를 뒤 단계(/api/continuations)에서
+        # 채우고 싶을 때 defer_counts=1 을 보낸다. 한방단어 모드는 후보를 먼저 보여 주고
+        # 화면이 이어서 한방 여부를 확인한다. `이어갈 단어 적은 순`·`한방단어 우선`
+        # 정렬은 개수가 정렬에 필요하므로 예전처럼 한 번에 계산한다.
+        defer_counts = as_bool("defer_counts", False) and (mode == "one-shot" or sort not in {"one-shot", "next"})
         deferred = False
-        if mode == "one-shot":
+        if mode == "one-shot" and defer_counts:
+            # 1단계: 후보를 모으고 '희귀 끝글자' 후보만 빠르게 판정해 돌려준다.
+            # 나머지 후보(is_one_shot=None)는 화면이 /api/continuations 로 확인한다.
+            confirmed, pending, raw_total, warnings = gather_one_shot_first_phase(dictionaries, query, filters, dueum)
+            for word in pending:
+                word["one_shot_pending"] = True
+            analysed = confirmed + pending
+            safe_sort = sort if sort in {"alphabet", "short", "long"} else "alphabet"
+            visible = order_words(confirmed, safe_sort) + pending
+            deferred = True
+            has_more = False
+        elif mode == "one-shot":
             # 페이지 1에서 한방단어 전체 목록을 모아 캐시하고, 이후 페이지는
             # 그 목록을 잘라서 보여 준다. 빈 페이지 무한 반복이 사라진다.
             full_list, raw_total, warnings = gather_one_shot_words(dictionaries, query, filters, dueum)
@@ -1017,7 +1068,7 @@ def continuations():
         dueum = as_bool("dueum", True)
         if not syllables:
             return jsonify(counts={}, warnings=[])
-        counts, warnings = fast_continuation_counts(dictionaries, syllables, filters, dueum)
+        counts, warnings = fast_continuation_counts(dictionaries, syllables, filters, dueum, patient_retry=True)
         payload = {}
         for syllable in syllables:
             count, notes = counts.get(syllable, (0, ["확인하지 못했습니다."]))

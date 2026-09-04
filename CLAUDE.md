@@ -69,8 +69,10 @@ OPENDICT_API_KEY=우리말샘_키
 - 검색 방식은 `type_search=search`, `method=start`인 시작 일치 검색이다.
 - 요청 제한 시간은 연결 10초/응답 20초이며 실패 시 한 번 재시도한다. 빠른 조회 경로는 연결 2초/응답 3초·1회다.
 - 국립국어원 서버 연결은 공유 `requests.Session`(`_http`)으로 재사용한다. `fetch_dictionary()`는 `_http.get`을 쓴다.
-- 독립적인 끝 글자 조회는 `fast_continuation_counts()`가 `LOOKUP_WORKERS`(20)개 작업자로 병렬 처리하고 실패분을 1회 재시도한다. `analyse_words()` 빠른 경로와 `/api/continuations`가 이 함수를 공유한다.
-- 두 단계 로딩: `defer_counts=1`이고 정렬이 가나다·짧은·긴 순이면 `search()`가 `describe_words_without_counts()`로 단어 목록만(`deferred=true`, `next_word_count=null`) 먼저 돌려주고, 화면이 `/api/continuations`로 숫자·한방 표시를 채운다. `next`·`one-shot` 정렬과 `mode=one-shot`은 예전처럼 한 번에 계산한다.
+- 독립적인 끝 글자·희귀후보 조회는 `LOOKUP_WORKERS`(36)개 작업자로 병렬 처리한다(`_http` 연결 풀 크기와 맞춘다). `fast_continuation_counts()`가 실패분을 1회 재시도하며 `patient_retry`면 재시도는 긴 제한 시간(`PATIENT_FAST_TIMEOUT`)으로 한다. `analyse_words()` 빠른 경로와 `/api/continuations`가 이 함수를 공유한다.
+- 두 단계 로딩(`defer_counts=1`, `next`·`one-shot` 정렬 제외):
+  - `words`/`all` 모드: `search()`가 `describe_words_without_counts()`로 단어 목록만(`deferred=true`, `next_word_count=null`) 먼저 돌려주고, 화면이 `/api/continuations`로 숫자·한방 표시를 채운다.
+  - `one-shot` 모드: `gather_one_shot_first_phase()`가 후보를 모아 희귀 끝글자(`RARE_FINALS`) 후보만 빠르게 판정해 확정 한방단어 + 나머지 후보(`one_shot_pending=true`, `is_one_shot=null`)를 돌려준다. 화면이 `/api/continuations`로 나머지를 확인해 한방이 아닌 후보 카드를 지운다. `defer_counts` 없으면 예전처럼 `gather_one_shot_words()`가 전체를 한 번에 캐시·판정한다.
 - 화면 페이지 크기는 24개, 공식 API 묶음 크기는 100개다.
 - 필터로 앞쪽 결과가 모두 제거될 수 있으므로 `paged_search()`는 필요한 결과가 모일 때까지 최대 `MAX_API_SCAN`(10)묶음 × 100개 ≈ 1000개 범위에서 다음 묶음을 확인한다.
 - 메모리 `TTLCache`의 기본 만료 시간은 30분이다. 서버 재시작 시 사라지며 프로세스 간 공유되지 않는다. `fetch_dictionary()`는 캐시 원본 오염을 막으려고 항상 `copy.deepcopy`한 복사본을 돌려준다.
@@ -99,7 +101,7 @@ OPENDICT_API_KEY=우리말샘_키
 - 로딩·메시지·결과 영역은 `hidden` 속성으로 제어하며 `[hidden]{display:none!important}` 규칙을 유지한다.
 - 정렬 `select`를 바꾸면 서버에 새로 요청한다(정렬 기준별 후보 수집 방식이 다르기 때문). 브라우저 안에서도 `sortedWords()`로 한 번 더 정리하지만 최종 정렬은 서버 응답 순서를 따른다.
 - 느린 이전 응답이 새 응답을 덮어쓰지 않도록 `searchSeq`로 순번을 확인한다. `fillDeferredCounts()`도 `mySeq`가 어긋나면 조용히 멈춘다.
-- `data.deferred`면 단어를 먼저 그리고, `fillDeferredCounts()`가 `/api/continuations`로 이어갈 단어 수·한방 뱃지를 채운 뒤 다시 그린다. 그동안 카드는 "확인 중…"으로 둔다.
+- `data.deferred`면 목록을 먼저 그리고, `fillDeferredCounts()`가 `/api/continuations`로 이어갈 단어 수·한방 뱃지를 채운 뒤 다시 그린다. 그동안 일반 카드는 "확인 중…", 한방단어 모드의 미판정 후보(`one_shot_pending`)는 "한방단어인지 확인 중…" 뱃지로 둔다. 한방단어 모드에서는 한방이 아니라고 확인된 후보 카드를 지운다.
 - 옛한글(첫가끝 낱자모·확장·PUA)이 든 낱말은 `ARCHAIC_HANGUL` 정규식으로 찾아 카드에 안내 문구를 붙인다. 표기는 지우지 않고 그대로 둔다. 우리말샘은 이런 글자를 U+E451 같은 사용자 지정 영역 코드로 준다.
 - 모바일에서 상세 설정은 `details` 요소로 접을 수 있어야 한다.
 

@@ -34,9 +34,10 @@ function buildParams(page = 1) {
   const data = new FormData(form);
   const params = new URLSearchParams({query: data.get('query').trim(), dictionary: data.get('dictionary'), mode: data.get('mode'), sort: sortSelect.value, page});
   ['noun_only','include_proper','include_north','include_dialect','include_old','include_technical','include_single','dueum'].forEach(name => params.set(name, data.has(name)));
-  // 가나다·짧은·긴 순은 '이어갈 단어 수' 없이도 순서가 확정되므로, 단어 목록을
-  // 먼저 받고 숫자는 두 번째 요청(/api/continuations)으로 채운다.
-  if (data.get('mode') !== 'one-shot' && sortSelect.value !== 'next' && sortSelect.value !== 'one-shot') params.set('defer_counts', '1');
+  // 두 단계 로딩: 목록을 먼저 받고 '이어갈 단어 수'·한방 여부는 두 번째 요청
+  // (/api/continuations)으로 채운다. '이어갈 단어 적은 순'·'한방단어 우선' 정렬은
+  // 개수가 정렬에 필요하므로 예전처럼 한 번에 계산한다.
+  if (sortSelect.value !== 'next' && sortSelect.value !== 'one-shot') params.set('defer_counts', '1');
   return params;
 }
 
@@ -54,8 +55,10 @@ function card(word) {
   const definitionHtml = Array.isArray(word.definitions) && word.definitions.length > 1
     ? `<ol class="definition definition-list">${word.definitions.map(sense => `<li>${escapeHtml(sense.definition)}</li>`).join('')}</ol>`
     : `<p class="definition">${escapeHtml(word.definition)}</p>`;
+  const badgeHtml = word.is_one_shot ? '<span class="badge">한방단어</span>'
+    : word.one_shot_pending ? '<span class="badge badge--pending">한방단어인지 확인 중…</span>' : '';
   return `<article class="word-card ${word.is_one_shot ? 'one-shot' : ''}${widthClass}"${isNew ? ' data-new-result="true"' : ''}>
-    <div class="card-top"><h3>${escapeHtml(word.word)}</h3>${word.is_one_shot ? '<span class="badge">한방단어</span>' : ''}</div>
+    <div class="card-top"><h3>${escapeHtml(word.word)}</h3>${badgeHtml}</div>
     <p class="pos">${escapeHtml(word.part_of_speech)} · ${escapeHtml(word.dictionary)}</p>
     ${archaicNote}
     ${definitionHtml}
@@ -136,6 +139,7 @@ function prefetchNextPage() {
 // 끝 글자는 한 번 더 확인한다. 검색이 새로 시작되면(mySeq 불일치) 조용히 멈춘다.
 async function fillDeferredCounts(mySeq, searchKey) {
   const source = new URLSearchParams(searchKey);
+  const oneShotMode = source.get('mode') === 'one-shot';
   const filterNames = ['noun_only','include_proper','include_north','include_dialect','include_old','include_technical','include_single','dueum'];
 
   const fetchCounts = async syllables => {
@@ -157,6 +161,8 @@ async function fillDeferredCounts(mySeq, searchKey) {
         w.count_available = true;
       }
     });
+    // 한방단어 모드: 한방이 아니라고 확인된 후보는 목록에서 뺀다.
+    if (oneShotMode) state.words = state.words.filter(w => !(w.one_shot_pending && w.is_one_shot === false));
     if (state.lastData) {
       state.lastData.one_shot_count = state.words.filter(w => w.is_one_shot).length;
       render(state.lastData);
@@ -165,15 +171,26 @@ async function fillDeferredCounts(mySeq, searchKey) {
 
   for (let attempt = 0; attempt < 2; attempt++) {
     const pending = [...new Set(state.words.filter(w => w.next_word_count == null && w.last_syllable).map(w => w.last_syllable))];
-    if (!pending.length) return;
+    if (!pending.length) break;
     if (attempt > 0) await wait(1200);
     const counts = await fetchCounts(pending);
     if (mySeq !== searchSeq) return;
     applyAndRender(counts);
   }
-  // 두 번 시도 후에도 못 채운 끝 글자는 '확인 실패'로 표시한다.
-  state.words.forEach(w => { if (w.next_word_count == null) w.count_available = false; });
-  if (state.lastData) render(state.lastData);
+  if (oneShotMode) {
+    // 두 번 시도해도 확인 못 한 후보는 한방단어라고 단정하지 않고 뺀다.
+    state.words = state.words.filter(w => !w.one_shot_pending || w.is_one_shot === true);
+  } else {
+    // 일반 목록: 못 채운 끝 글자는 '확인 실패'로 표시한다.
+    state.words.forEach(w => { if (w.next_word_count == null) w.count_available = false; });
+  }
+  if (state.lastData) {
+    state.lastData.one_shot_count = state.words.filter(w => w.is_one_shot).length;
+    render(state.lastData);
+  }
+  if (oneShotMode && !state.words.length) {
+    showMessage('확인된 한방단어가 없습니다. 오류가 아니라, 선택한 사전과 필터 기준에서 끝까지 확인했지만 한방단어를 찾지 못한 상태입니다.', 'notice');
+  }
 }
 
 async function search(page = 1, append = false) {

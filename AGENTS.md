@@ -59,7 +59,9 @@ OPENDICT_API_KEY=우리말샘_키
 
 `dictionary`은 `stdict`, `opendict`, `mode`는 `all`, `words`, `one-shot`을 허용한다. 검색 필터는 `Filters` 데이터 클래스와 쿼리 매개변수 이름을 일치시킨다.
 
-`/api/search`에 `defer_counts=1`을 주면 가나다·짧은·긴 순 목록을 이어갈 단어 수 없이(`next_word_count=null`, `deferred=true`) 먼저 돌려주고, 화면이 `/api/continuations`로 숫자와 한방단어 표시를 채운다. `sort`가 `next`·`one-shot`이거나 `mode=one-shot`이면 이 값은 무시된다.
+`/api/search`에 `defer_counts=1`을 주면 목록을 이어갈 단어 수 없이(`next_word_count=null`, `deferred=true`) 먼저 돌려준다. `sort`가 `next`·`one-shot`이면 무시된다.
+- `words`/`all` 모드: 단어 목록만 먼저, 화면이 `/api/continuations`로 숫자·한방 표시를 채운다.
+- `one-shot` 모드: `gather_one_shot_first_phase()`가 희귀 끝글자 후보만 빠르게 판정해 확정 한방단어 + 미판정 후보(`one_shot_pending=true`)를 돌려주고, 화면이 나머지를 확인해 한방 아닌 후보를 지운다.
 
 ## 실행과 진단
 
@@ -79,8 +81,10 @@ OPENDICT_API_KEY=우리말샘_키
 - `Filters`: 모든 검색 필터와 캐시 키 직렬화. 주소창 호출 기본값은 `FILTER_UI_DEFAULTS`(화면 체크 상태와 일치).
 - `_http`: 공유 `requests.Session`(연결 재사용). `fetch_dictionary()`는 `requests.get`이 아니라 `_http.get`을 쓴다.
 - `fetch_dictionary()`: 인증, 재시도, 제한 시간, JSON/XML 파싱, 필터 적용.
-- `fast_continuation_counts()`: 여러 끝 글자를 `LOOKUP_WORKERS`개 작업자로 병렬 조회하고 실패분을 1회 재시도. `analyse_words()` 빠른 경로와 `/api/continuations`가 공유한다.
+- `fast_continuation_counts()`: 여러 끝 글자를 `LOOKUP_WORKERS`개 작업자로 병렬 조회하고 실패분을 1회 재시도(`patient_retry`면 긴 제한 시간). `analyse_words()` 빠른 경로와 `/api/continuations`가 공유한다.
 - `describe_words_without_counts()`: 두 단계 로딩 1단계에서 카드에 필요한 값(마지막 글자·사전 이름)만 채우고 수치는 `None`.
+- `gather_one_shot_candidates()` / `gather_one_shot_first_phase()`: 한방단어 모드 2단계 로딩용. 후보만 모으거나, 희귀 끝글자만 빠르게 판정해 (확정, 미판정 후보) 로 나눈다.
+- `rare_final_candidates()` / `prefix_expansion_candidates()`: 희귀 끝글자 역검색·접두 확장. 작업자 수는 `LOOKUP_WORKERS`.
 - `paged_search()`: 필터를 통과한 화면 페이지 수집.
 - `continuation_count()`: 후속 단어 존재 확인. 한 항목만 조회하도록 축소하면 한 글자 필터 때문에 거짓 한방 판정이 재발한다. `dueum`이면 원음+정방향+역방향(`dueum_reverse_variants`)을 검사하고, 1페이지가 전부 걸리고 `total`이 크면 `start=2`를 한 번 더 본다. 사전 간 수는 `max`로 합친다(근사치).
 - `gather_one_shot_words()`: 한방단어 모드 전체 목록 1회 수집 + 캐시. 라우트는 이 목록을 페이지로 자른다.
@@ -122,8 +126,8 @@ OPENDICT_API_KEY=우리말샘_키
 - 화면에는 24개 단위로 제공한다.
 - 첫 요청에서 전체 후보를 무제한 수집하거나 모든 뜻을 순차 조회하지 않는다.
 - 마지막 음절별 조회는 캐시하고 독립 요청은 제한된 작업자 수로 병렬화한다.
-- 공식 API에 과도한 동시 요청을 보내지 않는다. 현재 상한은 `LOOKUP_WORKERS`(20)개 작업자이며, 연결은 공유 `Session`으로 재사용한다.
-- 가나다·짧은·긴 순 목록은 두 단계로 나눠 보낸다(1단계 단어 목록, 2단계 `/api/continuations`). 개수가 정렬에 필요한 경로(`next`·`one-shot`·`mode=one-shot`)는 한 번에 계산한다.
+- 공식 API 동시 요청 상한은 `LOOKUP_WORKERS`(36, `_http` 풀 크기와 일치)이며, 연결은 공유 `Session`으로 재사용한다.
+- 목록은 두 단계로 나눠 보낸다(1단계 목록/후보, 2단계 `/api/continuations`). 한방단어 모드도 2단계다. 개수가 정렬에 필요한 경로(`next`·`one-shot` 정렬)만 한 번에 계산한다.
 - 제한 시간과 재시도를 없애지 않는다. 현재 연결 10초, 응답 20초, 총 2회 시도(빠른 경로는 연결 2초·응답 3초·1회)다.
 - 성능 변경 후 흔한 글자 `기`와 드문 글자 `슘` 양쪽의 응답 시간과 판정을 확인한다.
 

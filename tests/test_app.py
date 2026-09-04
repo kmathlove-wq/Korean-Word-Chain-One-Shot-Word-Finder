@@ -134,7 +134,7 @@ class HelperTests(unittest.TestCase):
         knee = app.normalize_item({"word": "무릎", "sense": {"pos": "명사", "definition": "넓적다리와 정강이 사이."}}, "stdict")
         sodium = app.normalize_item({"word": "무수탄산나트륨", "sense": {"pos": "품사 없음", "definition": "탄산 나트륨 무수물."}}, "stdict")
 
-        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True):
+        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True, _slow=False):
             return (0, []) if syllable in {"릎", "륨"} else (10, [])
 
         with patch.object(app, "paged_search", return_value=([], 3449, [])), \
@@ -150,7 +150,7 @@ class HelperTests(unittest.TestCase):
     def test_next_sort_uses_fast_continuation_counts_for_all_syllables(self):
         many = app.normalize_item({"word": "장가", "sense": {"pos": "명사"}}, "stdict")
         few = app.normalize_item({"word": "장튬", "sense": {"pos": "명사"}}, "stdict")
-        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True):
+        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True, _slow=False):
             return (0, []) if syllable == "튬" else (30, [])
         with patch.object(app, "paged_search", return_value=([many, few], 2, [])), \
              patch.object(app, "continuation_count", side_effect=count_for_syllable) as count:
@@ -193,7 +193,7 @@ class HelperTests(unittest.TestCase):
     def test_one_shot_sort_uses_broader_candidate_pool(self):
         safe = app.normalize_item({"word": "가나", "sense": {"pos": "명사"}}, "stdict")
         shot = app.normalize_item({"word": "가슘", "sense": {"pos": "명사"}}, "stdict")
-        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True):
+        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True, _slow=False):
             return (0, []) if syllable == "슘" else (3, [])
         with patch.object(app, "paged_search", return_value=([safe, shot], 2, [])), \
              patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
@@ -238,7 +238,7 @@ class HelperTests(unittest.TestCase):
     def test_one_shot_sort_expands_hidden_rare_prefixes(self):
         seed = app.normalize_item({"word": "인듐", "sense": {"pos": "명사"}}, "stdict")
         sodium = app.normalize_item({"word": "인산나트륨", "pos": "품사 없음", "definition": "인산 나트륨."}, "stdict")
-        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True):
+        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True, _slow=False):
             return (0, []) if syllable in {"듐", "륨"} else (5, [])
         with patch.object(app, "paged_search", return_value=([], 2340, [])), \
              patch.object(app, "rare_final_candidates", return_value=([seed], [])), \
@@ -582,7 +582,7 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(response.json["words"][0]["next_word_count"], 7)
 
     def test_continuations_route_returns_counts_and_one_shot_flags(self):
-        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True):
+        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True, _slow=False):
             return (0, []) if syllable == "쁨" else (12, [])
         with patch.object(app, "continuation_count", side_effect=count_for_syllable):
             response = app.app.test_client().get(
@@ -608,6 +608,38 @@ class HelperTests(unittest.TestCase):
         response = app.app.test_client().get("/api/continuations?dictionary=stdict&syllables=,abc,12")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["counts"], {})
+
+    def test_one_shot_mode_deferred_confirms_rare_and_defers_others(self):
+        lithium = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
+        common = app.normalize_item({"word": "리본", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "paged_search", return_value=([lithium, common], 5000, [])), \
+             patch.object(app, "rare_final_candidates", return_value=([], [])), \
+             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
+             patch.object(app, "continuation_count", return_value=(0, [])) as count:
+            response = app.app.test_client().get(
+                "/api/search?query=리&dictionary=stdict&mode=one-shot&sort=alphabet&dueum=false&defer_counts=1"
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json["deferred"])
+        by_word = {w["word"]: w for w in response.json["words"]}
+        self.assertTrue(by_word["리튬"]["is_one_shot"])
+        self.assertIsNone(by_word["리본"]["is_one_shot"])
+        self.assertTrue(by_word["리본"]["one_shot_pending"])
+        # 1단계에서는 희귀 끝글자만 판정한다("튬"만, "본"은 화면이 이어서 확인).
+        self.assertEqual([c.args[1] for c in count.call_args_list], ["튬"])
+
+    def test_one_shot_mode_without_defer_still_returns_full_list(self):
+        lithium = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "paged_search", return_value=([lithium], 1, [])), \
+             patch.object(app, "rare_final_candidates") as rare, \
+             patch.object(app, "continuation_count", return_value=(0, [])):
+            response = app.app.test_client().get(
+                "/api/search?query=리&dictionary=stdict&mode=one-shot&sort=alphabet&dueum=false"
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json["deferred"])
+        self.assertEqual([w["word"] for w in response.json["words"]], ["리튬"])
+        rare.assert_not_called()
 
 
 if __name__ == "__main__":
