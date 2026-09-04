@@ -10,5 +10,7 @@
 - 두 단계 로딩(`defer_counts=1`, `next`·`one-shot` 정렬만 제외):
   - `words`/`all`: `search()`가 `describe_words_without_counts()`로 목록만 먼저(`deferred=true`), 화면 `fillDeferredCounts()`가 `GET /api/continuations`로 숫자·한방 뱃지를 채움.
   - `one-shot` 모드: `gather_one_shot_first_phase()`가 후보를 모아 `RARE_FINALS` 끝글자만 빠르게 판정(확정) + 나머지 후보(`one_shot_pending=true`)를 반환. 화면이 2단계로 나머지 확인 후 한방 아닌 카드 제거. `defer_counts` 없으면 `gather_one_shot_words()` 전체 캐시 경로 그대로.
-- 끝 글자 병렬 조회는 `fast_continuation_counts()`로 통일(= `analyse_words` 빠른 경로 + `/api/continuations` 공유). `patient_retry`면 재시도를 `PATIENT_FAST_TIMEOUT(3,8)`로. `LOOKUP_WORKERS=36`(= `_http` 풀 크기), `rare_final_candidates`/`prefix_expansion_candidates`도 같은 작업자 수. 연결은 공유 `_http = requests.Session()`.
-- 측정(2026-09-04 배포): "시작하는 단어" 첫 화면 ~2초(전 18초). "한방단어" 모드는 국립국어원 API가 느릴 때 2단계에서 여전히 오래 걸릴 수 있으나 1단계 후보는 빨리 뜬다. NIKL 지연은 대체로 일시적이라 재시도로 회복.
+- 끝 글자 병렬 조회는 `fast_continuation_counts()`로 통일(= `analyse_words` 빠른 경로 + `/api/continuations` 공유). `patient_retry`면 재시도를 `PATIENT_FAST_TIMEOUT(3,6)`로. `LOOKUP_WORKERS=36`(= `_http` 풀 크기), `rare_final_candidates`/`prefix_expansion_candidates`도 같은 작업자 수. 연결은 공유 `_http = requests.Session()`.
+- `/api/continuations` 는 한 요청에 끝 글자를 많이(20+) 넣고 NIKL이 크게 지연되면 gunicorn 60초 제한을 넘겨 502가 난다. 화면 `fillDeferredCounts()`가 8개씩 잘게 나눠 병렬 호출하고 실패분만 backoff(0·1.5·3·5초)로 재시도한다. 서버 `CONTINUATION_SYLLABLE_LIMIT=60`은 안전장치.
+- 첫 한방단어 검색 예열: `GET /api/warm` → 백그라운드로 `rare_final_candidates`의 '끝일치' fetch 캐시를 채움(검색어 무관). 화면이 페이지 로드 시 0·1.5·4초에 3회 호출(워커 2개라 프로세스별 캐시 대비). `_last_warm` 가드(CACHE_TTL/2).
+- 측정(2026-09-04 배포): "시작하는 단어" 첫 화면 ~2초(전 18초). "한방단어" 1단계 후보/확정 한방단어 ~1~3초(예열·캐시 후), 2단계는 NIKL 상태 따라 십수 초까지. NIKL 지연은 대체로 일시적.
