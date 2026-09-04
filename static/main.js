@@ -7,7 +7,9 @@ const grid = document.querySelector('#word-grid');
 const moreButton = document.querySelector('#more-button');
 const moreTopButton = document.querySelector('#more-top-button');
 const sortSelect = document.querySelector('#sort-select');
-let state = { page: 1, words: [], hasMore: false, params: null, recentKeys: new Set(), prefetch: null };
+let state = { page: 1, words: [], hasMore: false, params: null, recentKeys: new Set(), prefetch: null, lastData: null };
+// 옛한글(아주 오래된 한글)·특수 코드 글자. 표준 글꼴엔 그림이 없어 네모로 보인다.
+const ARCHAIC_HANGUL = /[ᄀ-ᇿꥠ-꥿ힰ-퟿-]/;
 let searchSeq = 0;
 
 const setHidden = (element, hidden) => { element.hidden = hidden; };
@@ -32,13 +34,21 @@ function buildParams(page = 1) {
   const data = new FormData(form);
   const params = new URLSearchParams({query: data.get('query').trim(), dictionary: data.get('dictionary'), mode: data.get('mode'), sort: sortSelect.value, page});
   ['noun_only','include_proper','include_north','include_dialect','include_old','include_technical','include_single','dueum'].forEach(name => params.set(name, data.has(name)));
+  // 가나다·짧은·긴 순은 '이어갈 단어 수' 없이도 순서가 확정되므로, 단어 목록을
+  // 먼저 받고 숫자는 두 번째 요청(/api/continuations)으로 채운다.
+  if (data.get('mode') !== 'one-shot' && sortSelect.value !== 'next' && sortSelect.value !== 'one-shot') params.set('defer_counts', '1');
   return params;
 }
 
 function card(word) {
   const details = word.detail_url ? `<a href="${escapeHtml(word.detail_url)}" target="_blank" rel="noopener">사전에서 검색하기 ↗</a>` : '<span>검색 링크 없음</span>';
   const isNew = state.recentKeys.has(wordKey(word));
-  const nextCount = word.count_available === false ? '확인 실패' : `${word.next_word_count}개`;
+  const nextCount = word.next_word_count == null
+    ? (word.count_available === false ? '확인 실패' : '확인 중…')
+    : `${word.next_word_count}개`;
+  const archaicNote = ARCHAIC_HANGUL.test(word.word)
+    ? '<p class="archaic-note">이 낱말에는 아주 오래된 한글이 들어 있어요. 쓰는 기기에 따라 네모(□)로 보일 수 있으니 아래 뜻과 사전 링크로 확인하세요.</p>'
+    : '';
   const hangulLength = (word.word.match(/[가-힣]/g) || []).length;
   const widthClass = hangulLength >= 18 ? ' very-wide' : hangulLength >= 10 ? ' wide' : '';
   const definitionHtml = Array.isArray(word.definitions) && word.definitions.length > 1
@@ -47,6 +57,7 @@ function card(word) {
   return `<article class="word-card ${word.is_one_shot ? 'one-shot' : ''}${widthClass}"${isNew ? ' data-new-result="true"' : ''}>
     <div class="card-top"><h3>${escapeHtml(word.word)}</h3>${word.is_one_shot ? '<span class="badge">한방단어</span>' : ''}</div>
     <p class="pos">${escapeHtml(word.part_of_speech)} · ${escapeHtml(word.dictionary)}</p>
+    ${archaicNote}
     ${definitionHtml}
     <div class="stats"><span>마지막 글자 <strong>${escapeHtml(word.last_syllable)}</strong></span><span>이어갈 단어 <strong>${escapeHtml(nextCount)}</strong></span></div>
     <div class="card-actions">${details}<button class="copy" type="button" data-copy="${escapeHtml(word.word)}">복사</button></div>
@@ -120,6 +131,37 @@ function prefetchNextPage() {
   };
 }
 
+// 2단계: 단어 목록을 그린 뒤, 아직 비어 있는 '이어갈 단어 수'와 한방단어 표시를
+// 끝 글자별로 한꺼번에 물어 채운다. 검색이 새로 시작되면(mySeq 불일치) 조용히 멈춘다.
+async function fillDeferredCounts(mySeq, searchKey) {
+  const source = new URLSearchParams(searchKey);
+  const pending = [...new Set(state.words.filter(w => w.next_word_count == null && w.last_syllable).map(w => w.last_syllable))];
+  if (!pending.length) return;
+  const params = new URLSearchParams({dictionary: source.get('dictionary'), syllables: pending.join(',')});
+  ['noun_only','include_proper','include_north','include_dialect','include_old','include_technical','include_single','dueum'].forEach(name => { if (source.has(name)) params.set(name, source.get(name)); });
+  let counts = {};
+  try {
+    const response = await fetch(`/api/continuations?${params}`, {cache: 'no-store'});
+    const body = await response.json().catch(() => null);
+    counts = body?.counts || {};
+  } catch { /* 아래에서 '확인 실패'로 표시된다 */ }
+  if (mySeq !== searchSeq) return;
+  state.words.forEach(w => {
+    const info = counts[w.last_syllable];
+    if (info) {
+      w.next_word_count = info.count;
+      w.is_one_shot = info.one_shot;
+      w.count_available = info.available;
+    } else if (w.next_word_count == null) {
+      w.count_available = false;
+    }
+  });
+  if (state.lastData) {
+    state.lastData.one_shot_count = state.words.filter(w => w.is_one_shot).length;
+    render(state.lastData);
+  }
+}
+
 async function search(page = 1, append = false) {
   const params = append ? new URLSearchParams(state.params) : buildParams(page);
   params.set('page', page);
@@ -140,8 +182,9 @@ async function search(page = 1, append = false) {
     const incomingWords = uniqueWords(data.words);
     const newWords = append ? incomingWords.filter(word => !existingKeys.has(wordKey(word))) : [];
     const nextWords = uniqueWords(append ? [...state.words, ...incomingWords] : incomingWords);
-    state = {page, words: nextWords, hasMore: data.has_more, params: key, recentKeys: append ? new Set(newWords.map(wordKey)) : new Set(), prefetch: null};
+    state = {page, words: nextWords, hasMore: data.has_more, params: key, recentKeys: append ? new Set(newWords.map(wordKey)) : new Set(), prefetch: null, lastData: data};
     render(data);
+    if (data.deferred) fillDeferredCounts(mySeq, key);
     if (append && !scrollToNewResults()) requestAnimationFrame(() => moreButton.scrollIntoView({behavior: 'smooth', block: 'center'}));
     const warningText = data.warnings?.length ? `일부 결과 안내: ${data.warnings.join(' ')}` : '';
     if (!data.words.length) {

@@ -57,8 +57,9 @@ OPENDICT_API_KEY=우리말샘_키
 | `GET /` | Jinja 템플릿으로 메인 화면 렌더링 |
 | `GET /api/health` | 서버 상태와 사전별 키 설정 여부 반환 |
 | `GET /api/search` | 시작 단어 검색, 필터, 한방 판정, 페이지 응답 |
+| `GET /api/continuations` | 끝 글자 목록의 이어갈 단어 수만 병렬 계산 (`syllables=릉,강,…`) |
 
-`/api/search`의 주요 매개변수는 `query`, `dictionary`, `mode`, `page`, `noun_only`, `include_proper`, `include_north`, `include_dialect`, `include_old`, `include_technical`, `include_single`, `dueum`이다. `dictionary` 값은 `stdict`, `opendict` 중 하나다. `mode` 값은 `all`, `words`, `one-shot` 중 하나다. 필터 매개변수를 생략하면 화면 체크박스 기본값(`FILTER_UI_DEFAULTS`: 한 글자 포함만 꺼짐, 나머지 켜짐, 두음 켜짐)을 따른다. `page`에 숫자가 아닌 값이 오면 1로 처리한다.
+`/api/search`의 주요 매개변수는 `query`, `dictionary`, `mode`, `page`, `noun_only`, `include_proper`, `include_north`, `include_dialect`, `include_old`, `include_technical`, `include_single`, `dueum`, `defer_counts`이다. `dictionary` 값은 `stdict`, `opendict` 중 하나다. `mode` 값은 `all`, `words`, `one-shot` 중 하나다. 필터 매개변수를 생략하면 화면 체크박스 기본값(`FILTER_UI_DEFAULTS`: 한 글자 포함만 꺼짐, 나머지 켜짐, 두음 켜짐)을 따른다. `page`에 숫자가 아닌 값이 오면 1로 처리한다.
 
 ## 백엔드 핵심 규칙
 
@@ -66,7 +67,10 @@ OPENDICT_API_KEY=우리말샘_키
 - 표준국어대사전은 `https://stdict.korean.go.kr/api/search.do`, 우리말샘은 `https://opendict.korean.go.kr/api/search`를 사용한다.
 - JSON 응답을 우선 처리하고 JSON이 아니면 `xml.etree.ElementTree`로 XML을 파싱한다.
 - 검색 방식은 `type_search=search`, `method=start`인 시작 일치 검색이다.
-- 요청 제한 시간은 연결 10초/응답 20초이며 실패 시 한 번 재시도한다.
+- 요청 제한 시간은 연결 10초/응답 20초이며 실패 시 한 번 재시도한다. 빠른 조회 경로는 연결 2초/응답 3초·1회다.
+- 국립국어원 서버 연결은 공유 `requests.Session`(`_http`)으로 재사용한다. `fetch_dictionary()`는 `_http.get`을 쓴다.
+- 독립적인 끝 글자 조회는 `fast_continuation_counts()`가 `LOOKUP_WORKERS`(20)개 작업자로 병렬 처리하고 실패분을 1회 재시도한다. `analyse_words()` 빠른 경로와 `/api/continuations`가 이 함수를 공유한다.
+- 두 단계 로딩: `defer_counts=1`이고 정렬이 가나다·짧은·긴 순이면 `search()`가 `describe_words_without_counts()`로 단어 목록만(`deferred=true`, `next_word_count=null`) 먼저 돌려주고, 화면이 `/api/continuations`로 숫자·한방 표시를 채운다. `next`·`one-shot` 정렬과 `mode=one-shot`은 예전처럼 한 번에 계산한다.
 - 화면 페이지 크기는 24개, 공식 API 묶음 크기는 100개다.
 - 필터로 앞쪽 결과가 모두 제거될 수 있으므로 `paged_search()`는 필요한 결과가 모일 때까지 최대 `MAX_API_SCAN`(10)묶음 × 100개 ≈ 1000개 범위에서 다음 묶음을 확인한다.
 - 메모리 `TTLCache`의 기본 만료 시간은 30분이다. 서버 재시작 시 사라지며 프로세스 간 공유되지 않는다. `fetch_dictionary()`는 캐시 원본 오염을 막으려고 항상 `copy.deepcopy`한 복사본을 돌려준다.
@@ -94,7 +98,9 @@ OPENDICT_API_KEY=우리말샘_키
 - 사용자/API 문자열은 `escapeHtml()`을 거쳐 렌더링한다. 동음이의어는 `word.definitions`(최대 3개)를 번호 목록으로 그린다.
 - 로딩·메시지·결과 영역은 `hidden` 속성으로 제어하며 `[hidden]{display:none!important}` 규칙을 유지한다.
 - 정렬 `select`를 바꾸면 서버에 새로 요청한다(정렬 기준별 후보 수집 방식이 다르기 때문). 브라우저 안에서도 `sortedWords()`로 한 번 더 정리하지만 최종 정렬은 서버 응답 순서를 따른다.
-- 느린 이전 응답이 새 응답을 덮어쓰지 않도록 `searchSeq`로 순번을 확인한다.
+- 느린 이전 응답이 새 응답을 덮어쓰지 않도록 `searchSeq`로 순번을 확인한다. `fillDeferredCounts()`도 `mySeq`가 어긋나면 조용히 멈춘다.
+- `data.deferred`면 단어를 먼저 그리고, `fillDeferredCounts()`가 `/api/continuations`로 이어갈 단어 수·한방 뱃지를 채운 뒤 다시 그린다. 그동안 카드는 "확인 중…"으로 둔다.
+- 옛한글(첫가끝 낱자모·확장·PUA)이 든 낱말은 `ARCHAIC_HANGUL` 정규식으로 찾아 카드에 안내 문구를 붙인다. 표기는 지우지 않고 그대로 둔다. 우리말샘은 이런 글자를 U+E451 같은 사용자 지정 영역 코드로 준다.
 - 모바일에서 상세 설정은 `details` 요소로 접을 수 있어야 한다.
 
 ## 테스트
@@ -136,4 +142,5 @@ node --check static/main.js
 - 국립국어원 API 응답 속도와 일일 호출 제한에 영향을 받는다.
 - API 분류 필드가 일정하지 않아 일부 필터가 사전 웹사이트의 상세 검색과 완전히 같지 않을 수 있다.
 - 두음 변형 결과 수는 중복 제거된 정확한 합계가 아닐 수 있으나 한방 여부는 하나라도 존재하는지를 기준으로 한다.
+- 우리말샘 옛말의 옛한글은 사용자 지정 영역(PUA) 코드라 표준 글꼴에서 네모로 보인다. 표기는 그대로 두고 안내 문구만 붙인다.
 - 한방 판정은 선택한 사전과 필터 기준이며 실제 게임 규칙을 보장하지 않는다.

@@ -552,5 +552,63 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(merged[0]["definitions"][0]["definition"], "먹는 배.")
 
 
+    # --- 조각 5 회귀 테스트: 두 단계 로딩 + 이어갈 단어 수 전용 주소 ---
+    def test_words_mode_defers_counts_when_requested(self):
+        candidate = app.normalize_item({"word": "기쁨", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "paged_search", return_value=([candidate], 1, [])), \
+             patch.object(app, "continuation_count") as count:
+            response = app.app.test_client().get(
+                "/api/search?query=기&dictionary=stdict&mode=words&sort=alphabet&defer_counts=1"
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.json["deferred"])
+        word = response.json["words"][0]
+        self.assertIsNone(word["next_word_count"])
+        self.assertIsNone(word["is_one_shot"])
+        self.assertEqual(word["last_syllable"], "쁨")
+        count.assert_not_called()
+
+    def test_defer_counts_is_ignored_for_next_sort(self):
+        candidate = app.normalize_item({"word": "기쁨", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "paged_search", return_value=([candidate], 1, [])), \
+             patch.object(app, "rare_final_candidates", return_value=([], [])), \
+             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
+             patch.object(app, "continuation_count", return_value=(7, [])):
+            response = app.app.test_client().get(
+                "/api/search?query=기&dictionary=stdict&mode=words&sort=next&defer_counts=1"
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json["deferred"])
+        self.assertEqual(response.json["words"][0]["next_word_count"], 7)
+
+    def test_continuations_route_returns_counts_and_one_shot_flags(self):
+        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True):
+            return (0, []) if syllable == "쁨" else (12, [])
+        with patch.object(app, "continuation_count", side_effect=count_for_syllable):
+            response = app.app.test_client().get(
+                "/api/continuations?dictionary=stdict&syllables=쁨,가,쁨&dueum=false"
+            )
+        self.assertEqual(response.status_code, 200)
+        counts = response.json["counts"]
+        self.assertEqual(set(counts), {"쁨", "가"})
+        self.assertTrue(counts["쁨"]["one_shot"])
+        self.assertEqual(counts["쁨"]["count"], 0)
+        self.assertFalse(counts["가"]["one_shot"])
+        self.assertEqual(counts["가"]["count"], 12)
+
+    def test_continuations_route_marks_failed_syllable_unavailable(self):
+        with patch.object(app, "continuation_count", return_value=(0, ["응답 지연"])):
+            response = app.app.test_client().get("/api/continuations?dictionary=stdict&syllables=가")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json["counts"]["가"]["available"])
+        self.assertIsNone(response.json["counts"]["가"]["count"])
+        self.assertFalse(response.json["counts"]["가"]["one_shot"])
+
+    def test_continuations_route_ignores_blank_and_non_hangul_syllables(self):
+        response = app.app.test_client().get("/api/continuations?dictionary=stdict&syllables=,abc,12")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["counts"], {})
+
+
 if __name__ == "__main__":
     unittest.main()

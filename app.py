@@ -45,6 +45,9 @@ MAX_QUERY_LENGTH = 20
 CACHE_TTL = 60 * 30
 REQUEST_TIMEOUT = (10, 20)
 REQUEST_ATTEMPTS = 2
+# 서로 독립적인 끝 글자 조회를 한꺼번에 처리하는 최대 개수. 대부분 네트워크
+# 대기라 GIL 영향이 적다. 공식 API 부담을 고려해 적당한 값으로 둔다.
+LOOKUP_WORKERS = 20
 RARE_FINALS = {
     "튬", "듐", "륨", "슘", "븀", "늄", "뮴", "윰", "쥼", "줌",
     "릇", "릎", "릉", "쁨", "쯤", "낌", "깡", "꽝", "쩡", "슛",
@@ -104,6 +107,12 @@ class TTLCache:
 
 
 cache = TTLCache()
+
+# 국립국어원 서버에 매번 새로 접속(TLS 악수)하지 않고 연결을 재사용한다.
+_http = requests.Session()
+_http_adapter = requests.adapters.HTTPAdapter(pool_connections=8, pool_maxsize=32, max_retries=0)
+_http.mount("https://", _http_adapter)
+_http.mount("http://", _http_adapter)
 
 
 def compose_hangul(initial: str, vowel_index: int, final_index: int) -> str:
@@ -381,7 +390,7 @@ def fetch_dictionary(
     last_error: requests.RequestException | None = None
     for attempt in range(attempts):
         try:
-            response = requests.get(config["endpoint"], params=params, timeout=request_timeout)
+            response = _http.get(config["endpoint"], params=params, timeout=request_timeout)
             response.raise_for_status()
             break
         except requests.RequestException as exc:
@@ -593,6 +602,59 @@ def continuation_count(dictionaries: list[str], syllable: str, filters: Filters,
     return total_count, list(dict.fromkeys(warnings))
 
 
+def fast_continuation_counts(
+    dictionaries: list[str],
+    syllables,
+    filters: Filters,
+    dueum: bool,
+) -> tuple[dict[str, tuple[int, list[str]]], list[str]]:
+    """여러 끝 글자의 '이어갈 단어 수'를 한꺼번에 병렬로 빠르게 확인한다.
+
+    각 값은 (개수, 경고목록) 꼴이다. 짧은 제한 시간에 실패한 글자는
+    한 번 더 병렬로 확인한다. 지연 중인 공식 API를 모두 반복 호출하면
+    성공 수는 늘지 않으면서 운영 서버 제한 시간에 가까워지므로 재시도는
+    8개로 제한한다.
+    """
+    unique = [syllable for syllable in dict.fromkeys(syllables) if syllable]
+    counts: dict[str, tuple[int, list[str]]] = {}
+    if not unique:
+        return counts, []
+
+    def run(subset: list[str]) -> None:
+        with ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(subset))) as executor:
+            futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum, False): syllable for syllable in subset}
+            for future in as_completed(futures):
+                syllable = futures[future]
+                try:
+                    counts[syllable] = future.result()
+                except Exception:
+                    counts[syllable] = (0, [f"'{syllable}' 이어갈 단어 수를 확인하지 못했습니다."])
+
+    run(unique)
+    retry_syllables = [syllable for syllable, (_count, notes) in counts.items() if notes][:8]
+    if retry_syllables:
+        run(retry_syllables)
+    warnings: list[str] = []
+    for _syllable, (_count, notes) in counts.items():
+        warnings.extend(notes)
+    return counts, list(dict.fromkeys(warnings))
+
+
+def describe_words_without_counts(words: list[dict]) -> list[dict]:
+    """'이어갈 단어 수' 계산을 화면 뒤 단계로 미룰 때, 카드에 필요한
+    나머지 정보(마지막 글자, 사전 이름)만 채우고 수치는 비워 둔다."""
+    for word in words:
+        word.update(
+            last_syllable=last_hangul_syllable(word["word"]),
+            next_word_count=None,
+            is_one_shot=None,
+            count_available=None,
+            fast_judgement=True,
+            dictionary="두 사전 공통" if len(word["dictionary_codes"]) == 2 else DICTIONARIES[word["dictionary_codes"][0]]["name"],
+        )
+    return words
+
+
 def analyse_words(
     dictionaries: list[str],
     candidates: list[dict],
@@ -610,30 +672,8 @@ def analyse_words(
                 for word in candidates
                 if last_hangul_syllable(word["word"]) in RARE_FINALS
             }
-        counts: dict[str, tuple[int, list[str]]] = {}
+        counts, _count_warnings = fast_continuation_counts(dictionaries, uncertain_syllables, filters, dueum)
         warnings = []
-        if uncertain_syllables:
-            with ThreadPoolExecutor(max_workers=min(8, len(uncertain_syllables))) as executor:
-                futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum, False): syllable for syllable in uncertain_syllables}
-                for future in as_completed(futures):
-                    syllable = futures[future]
-                    try:
-                        counts[syllable] = future.result()
-                    except Exception:
-                        counts[syllable] = (0, [f"'{syllable}' 이어갈 단어 수를 확인하지 못했습니다."])
-            # 짧은 제한 시간에 실패한 끝글자는 일부를 한 번 더 병렬 확인한다.
-            # 지연 중인 공식 API를 모두 반복 호출하면 성공 수는 늘지 않으면서
-            # 운영 서버 제한 시간에 가까워지므로 한 요청당 8개로 제한한다.
-            retry_syllables = [syllable for syllable, (_count, notes) in counts.items() if notes][:8]
-            if retry_syllables:
-                with ThreadPoolExecutor(max_workers=min(8, len(retry_syllables))) as executor:
-                    futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum, False): syllable for syllable in retry_syllables}
-                    for future in as_completed(futures):
-                        syllable = futures[future]
-                        try:
-                            counts[syllable] = future.result()
-                        except Exception:
-                            counts[syllable] = (0, [f"'{syllable}' 이어갈 단어 수를 확인하지 못했습니다."])
         analysed = []
         for word in candidates:
             last = last_hangul_syllable(word["word"])
@@ -841,6 +881,11 @@ def search():
         filters = Filters(**{name: as_bool(name, FILTER_UI_DEFAULTS.get(name, False)) for name in Filters.__annotations__})
         dueum = as_bool("dueum", True)
         broad_sort = sort in {"one-shot", "next"} or mode == "one-shot"
+        # 화면이 단어 목록을 먼저 그린 뒤 '이어갈 단어 수'를 뒤 단계(/api/continuations)에서
+        # 채우고 싶을 때 defer_counts=1 을 보낸다. 개수가 정렬에 필요한 경우(broad_sort)에는
+        # 무시한다. 이 값이 없으면 예전처럼 한 번에 모두 계산한다.
+        defer_counts = as_bool("defer_counts", False) and not broad_sort
+        deferred = False
         if mode == "one-shot":
             # 페이지 1에서 한방단어 전체 목록을 모아 캐시하고, 이후 페이지는
             # 그 목록을 잘라서 보여 준다. 빈 페이지 무한 반복이 사라진다.
@@ -914,23 +959,31 @@ def search():
                     has_more = len(visible_pool) > PAGE_SIZE or page * PAGE_SIZE < raw_total
         else:
             candidates, raw_total, warnings = paged_search_with_dueum(dictionaries, query, filters, page, dueum)
-            analysed, notes = analyse_words(
-                dictionaries,
-                candidates,
-                filters,
-                dueum,
-                exact_counts=False,
-                # 일반 목록에서도 임시값 1이 아니라 마지막 글자별 API 수를 표시한다.
-                fast_all_counts=True,
-            )
-            warnings.extend(notes)
-            visible = [w for w in order_words(analysed, sort) if mode != "one-shot" or w["is_one_shot"]]
+            if defer_counts:
+                # 1단계: 단어 목록만 빠르게 돌려준다. 개수·한방 표시는 화면이
+                # /api/continuations 로 이어서 채운다. 이 분기의 정렬은
+                # 가나다·짧은·긴 순뿐이라 개수 없이도 순서가 확정된다.
+                analysed = describe_words_without_counts(candidates)
+                visible = order_words(analysed, sort)
+                deferred = True
+            else:
+                analysed, notes = analyse_words(
+                    dictionaries,
+                    candidates,
+                    filters,
+                    dueum,
+                    exact_counts=False,
+                    # 일반 목록에서도 임시값 1이 아니라 마지막 글자별 API 수를 표시한다.
+                    fast_all_counts=True,
+                )
+                warnings.extend(notes)
+                visible = order_words(analysed, sort)
             has_more = page * PAGE_SIZE < raw_total
         visible = dedupe_display_words(visible)
-        one_shot_count = sum(word["is_one_shot"] for word in analysed)
+        one_shot_count = sum(1 for word in analysed if word.get("is_one_shot"))
         return jsonify(query=query, dictionary=request.args.get("dictionary", "stdict"), dictionary_name=" + ".join(DICTIONARIES[x]["name"] for x in dictionaries),
                        total=raw_total, api_total=raw_total, one_shot_count=one_shot_count,
-                       page=page, page_size=PAGE_SIZE, has_more=has_more,
+                       page=page, page_size=PAGE_SIZE, has_more=has_more, deferred=deferred,
                        analysed_count=len(analysed), broad_sort=broad_sort, words=visible, warnings=list(dict.fromkeys(warnings)))
     except (ValueError, TypeError) as exc:
         return jsonify(error=str(exc)), 400
@@ -942,6 +995,46 @@ def search():
         # 서버 로그에는 추적을 남기되 검색어/키는 절대 기록하지 않는다.
         logger.exception("search failed")
         return jsonify(error="검색 처리 중 일시적인 오류가 발생했습니다. 잠시 후 다시 시도해 주세요."), 500
+
+
+CONTINUATION_SYLLABLE_LIMIT = 60
+
+
+@app.get("/api/continuations")
+def continuations():
+    """카드의 '이어갈 단어 수'만 따로, 병렬로 빠르게 계산해 돌려준다.
+
+    화면은 단어 목록을 먼저 그린 뒤 이 주소로 끝 글자들을 한꺼번에 물어
+    각 카드의 숫자와 한방단어 표시를 나중에 채운다. 응답은
+    {"counts": {"릉": {"count": 0, "available": true, "one_shot": true}, ...}} 꼴이다.
+    """
+    try:
+        dictionaries = selected_dictionaries(request.args.get("dictionary", "stdict"))
+        raw = request.args.get("syllables", "")
+        syllables = [s for s in dict.fromkeys(raw.split(",")) if re.fullmatch(r"[가-힣]", s or "")]
+        syllables = syllables[:CONTINUATION_SYLLABLE_LIMIT]
+        filters = Filters(**{name: as_bool(name, FILTER_UI_DEFAULTS.get(name, False)) for name in Filters.__annotations__})
+        dueum = as_bool("dueum", True)
+        if not syllables:
+            return jsonify(counts={}, warnings=[])
+        counts, warnings = fast_continuation_counts(dictionaries, syllables, filters, dueum)
+        payload = {}
+        for syllable in syllables:
+            count, notes = counts.get(syllable, (0, ["확인하지 못했습니다."]))
+            available = syllable in counts and not notes
+            payload[syllable] = {
+                "count": count if available else None,
+                "available": available,
+                "one_shot": available and count == 0,
+            }
+        return jsonify(counts=payload, warnings=list(dict.fromkeys(warnings)))
+    except (ValueError, TypeError) as exc:
+        return jsonify(error=str(exc)), 400
+    except ApiError as exc:
+        return jsonify(error=str(exc)), 502
+    except Exception:
+        logger.exception("continuations failed")
+        return jsonify(error="이어갈 단어 수를 확인하지 못했습니다. 잠시 후 다시 시도해 주세요."), 500
 
 
 if __name__ == "__main__":
