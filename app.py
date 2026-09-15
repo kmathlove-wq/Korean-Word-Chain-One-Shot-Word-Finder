@@ -46,11 +46,14 @@ ONE_SHOT_SCAN_CAP = 3000
 ONE_SHOT_SCAN_MAX_BATCHES = -(-ONE_SHOT_SCAN_CAP // API_PAGE_SIZE)
 # 검색 요청 하나에 쓸 수 있는 최대 시간(한방단어 모드, 이어갈 단어 적은
 # 순·한방단어 우선 정렬, /api/continuations 모두 공통). 실 서비스(Render)
-# 앞단이 응답을 약 30~32초에서 끊는 걸 직접 재현해 확인했고(2026-09-15),
-# 사용자 요청으로 10초 이내 응답을 목표로 8초까지 더 줄였다(2026-09-15,
-# 기기·필터와 무관하게 적용). 넘기면 그때까지 확인한 결과만 돌려주고,
-# 나머지는 다음 검색(캐시가 데워져 더 빨라짐)에 맡긴다.
-REQUEST_TIME_BUDGET = 8.0
+# 앞단이 응답을 약 30~32초에서 끊는 걸 직접 재현해 확인했다(2026-09-15).
+# 8초까지 줄였더니 국립국어원 API가 느린 날엔 흔한 글자(예: '리')가 시간
+# 부족으로 한방단어를 거의 못 찾는 문제가 생겨(2026-09-15, 실 서비스에서
+# 확인: '리' 2회 검색해 1개만 확인), 사용자와 상의해 15초로 다시 늘렸다.
+# 그래도 실 서비스 한도(약 30초)의 절반 수준이라 여유가 있다. 넘기면
+# 그때까지 확인한 결과만 돌려주고, 나머지는 다음 검색(캐시가 데워져
+# 더 빨라짐)에 맡긴다.
+REQUEST_TIME_BUDGET = 15.0
 REQUEST_TIME_BUDGET_WARNING = "시간이 부족해 일부 후보를 확인하지 못했습니다. 같은 글자로 다시 검색하면 이어서 더 찾아냅니다."
 FAST_CONTINUATION_PAGE_SIZE = API_PAGE_SIZE
 FAST_REQUEST_TIMEOUT = (2, 3)
@@ -714,14 +717,19 @@ def analyse_words(
     deadline: float | None = None,
 ) -> tuple[list[dict], list[str]]:
     if not exact_counts:
+        # 순서를 담는 목록으로 만든다(집합은 순서를 안 지킨다). candidates가
+        # candidate_priority로 이미 정렬돼 있으면(희귀 받침 후보 먼저) 그 순서
+        # 그대로 조회를 넣어서, 시간이 부족해 다 못 봐도 '한방단어일 가능성이
+        # 큰 후보'부터 확인하게 한다(2026-09-15, 시간을 아무 후보에나 쓰지
+        # 않도록 하는 개선).
         if fast_all_counts:
-            uncertain_syllables = {last_hangul_syllable(word["word"]) for word in candidates}
+            uncertain_syllables = list(dict.fromkeys(last_hangul_syllable(word["word"]) for word in candidates))
         else:
-            uncertain_syllables = {
+            uncertain_syllables = list(dict.fromkeys(
                 last_hangul_syllable(word["word"])
                 for word in candidates
                 if last_hangul_syllable(word["word"]) in RARE_FINALS
-            }
+            ))
         counts, _count_warnings = fast_continuation_counts(dictionaries, uncertain_syllables, filters, dueum, deadline=deadline)
         warnings = []
         analysed = []

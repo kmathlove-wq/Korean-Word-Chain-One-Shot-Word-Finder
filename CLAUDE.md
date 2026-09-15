@@ -81,7 +81,7 @@ OPENDICT_API_KEY=우리말샘_키
 - 화면에서는 표준국어대사전 또는 우리말샘 중 하나만 선택해 검색한다.
 - 한방단어 모드(`mode=one-shot`)는 `gather_one_shot_words()`가 전체 한방단어 목록을 한 번 모아 `(검색어, 사전, 필터, 두음)` 키로 캐시하고, 라우트는 그 목록을 페이지 크기로 자른다. 페이지 2 이상도 빈 결과 없이 정확히 동작한다.
 - 한방단어 후보 수집은 `collect_matching_words()`(2026-09-15 도입)가 맡는다. 검색어로 시작하는 단어를 사전 한 곳에서 최대 `ONE_SHOT_SCAN_CAP`(3000)개까지 실제로 병렬 수집하며, 손으로 정해둔 '희귀 받침 목록'(`RARE_FINALS`)을 추측하지 않는다. `rare_final_candidates()`/`prefix_expansion_candidates()`는 이제 `sort=next`·`sort=one-shot`(일반 검색 모드)와 `/api/warm` 예열에서만 쓰인다.
-- `/api/search`(모든 모드·정렬)와 `/api/continuations`는 요청마다 `REQUEST_TIME_BUDGET`(8초, 2026-09-15 사용자 요청으로 10초 이내 응답 목표) 하나를 공유하는 마감 시각(`time.monotonic()+8`)을 계산해 넓게 탐색·판정하는 함수 전부(`collect_matching_words`·`rare_final_candidates`·`prefix_expansion_candidates`·`analyse_words`·`fast_continuation_counts`)에 전달한다. 각 함수는 `concurrent.futures.wait(timeout=...)`로 마감까지 시작 못 한 조회를 포기한다(이미 실행 중인 스레드는 배경에서 끝내되 결과는 버림). 시간이 부족했으면(`REQUEST_TIME_BUDGET_WARNING`) `gather_one_shot_words()`가 그 결과를 캐시하지 않아, 다음 검색이 그새 데워진 `fetch_dictionary` 캐시로 더 찾을 수 있다.
+- `/api/search`(모든 모드·정렬)와 `/api/continuations`는 요청마다 `REQUEST_TIME_BUDGET`(15초) 하나를 공유하는 마감 시각(`time.monotonic()+15`)을 계산해 넓게 탐색·판정하는 함수 전부(`collect_matching_words`·`rare_final_candidates`·`prefix_expansion_candidates`·`analyse_words`·`fast_continuation_counts`)에 전달한다. 각 함수는 `concurrent.futures.wait(timeout=...)`로 마감까지 시작 못 한 조회를 포기한다(이미 실행 중인 스레드는 배경에서 끝내되 결과는 버림). 시간이 부족했으면(`REQUEST_TIME_BUDGET_WARNING`) `gather_one_shot_words()`가 그 결과를 캐시하지 않아, 다음 검색이 그새 데워진 `fetch_dictionary` 캐시로 더 찾을 수 있다. 처음 8초로 줄였다가 국립국어원 API가 느릴 때 흔한 글자가 한방단어를 거의 못 찾는 문제가 생겨(2026-09-15, 실 서비스 확인) 15초로 다시 늘렸다. `analyse_words`는 끝 글자 조회 순서를 candidates 순서(정렬돼 있으면 희귀 받침 후보 먼저)대로 보존해, 시간이 부족해도 가능성 큰 후보부터 확인하게 한다.
 
 ## 한방단어 판정
 

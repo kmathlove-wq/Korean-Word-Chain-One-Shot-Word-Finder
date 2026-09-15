@@ -586,6 +586,18 @@ class HelperTests(unittest.TestCase):
         self.assertFalse(analysed[1]["is_one_shot"])
         count.assert_called_once()
 
+    def test_fast_all_counts_checks_candidates_in_priority_order(self):
+        # 회귀 테스트(2026-09-15): 시간이 부족해 일부만 확인해도 '한방단어일
+        # 가능성이 큰 후보'(candidate_priority가 앞에 둔 후보)부터 확인하도록,
+        # 집합이 아니라 candidates 순서를 보존한 목록으로 조회를 넣는다.
+        rare = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
+        common = app.normalize_item({"word": "리본", "sense": {"pos": "명사"}}, "stdict")
+        candidates = sorted([common, rare], key=app.candidate_priority)  # 리튬(희귀 받침)이 앞으로 온다
+        with patch.object(app, "fast_continuation_counts", return_value=({}, [])) as fast_counts:
+            app.analyse_words(["stdict"], candidates, app.Filters(), True, exact_counts=False, fast_all_counts=True)
+        checked_syllables = fast_counts.call_args.args[1]
+        self.assertEqual(checked_syllables, ["튬", "본"])
+
 
     # --- 조각 1 회귀 테스트: 한방 판정 정확도 ---
     def test_continuation_checks_second_page_when_first_page_filtered_but_total_large(self):
