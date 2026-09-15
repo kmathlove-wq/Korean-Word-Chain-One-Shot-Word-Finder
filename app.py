@@ -8,7 +8,7 @@ import re
 import threading
 import time
 import xml.etree.ElementTree as ET
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
@@ -44,6 +44,12 @@ ONE_SHOT_ANALYSIS_LIMIT = 80
 # 단어는 여전히 놓칠 수 있다.
 ONE_SHOT_SCAN_CAP = 3000
 ONE_SHOT_SCAN_MAX_BATCHES = -(-ONE_SHOT_SCAN_CAP // API_PAGE_SIZE)
+# 한방단어 모드 전체(후보 수집 + 판정)에 쓸 수 있는 최대 시간. 실 서비스(Render)
+# 앞단이 응답을 약 30~32초에서 끊는 걸 직접 재현해 확인했다(2026-09-15). 그
+# 한도를 넘기지 않도록 여유를 두고 20초로 잡는다. 넘기면 그때까지 확인한
+# 결과만 돌려주고, 나머지는 다음 검색(캐시가 데워져 더 빨라짐)에 맡긴다.
+ONE_SHOT_TIME_BUDGET = 20.0
+ONE_SHOT_TIME_BUDGET_WARNING = "시간이 부족해 일부 후보를 확인하지 못했습니다. 같은 글자로 다시 검색하면 이어서 더 찾아냅니다."
 FAST_CONTINUATION_PAGE_SIZE = API_PAGE_SIZE
 FAST_REQUEST_TIMEOUT = (2, 3)
 # 빠른 경로 재시도용. 공식 API가 지연될 때 첫 조회(3초)에서 놓친 끝 글자를
@@ -619,6 +625,7 @@ def fast_continuation_counts(
     filters: Filters,
     dueum: bool,
     patient_retry: bool = False,
+    deadline: float | None = None,
 ) -> tuple[dict[str, tuple[int, list[str]]], list[str]]:
     """여러 끝 글자의 '이어갈 단어 수'를 한꺼번에 병렬로 빠르게 확인한다.
 
@@ -626,6 +633,11 @@ def fast_continuation_counts(
     실패한 글자는 한 번 더 병렬로 확인한다. `patient_retry`면 재시도는
     긴 제한 시간(정확 조회)으로 해서 지연된 공식 API에서도 값을 받아 낸다.
     운영 서버 제한 시간을 넘기지 않도록 재시도 대상은 12개로 제한한다.
+
+    `deadline`(`time.monotonic()` 기준 시각)을 주면 그 시각까지 끝나지 않은
+    조회는 포기하고 '시간 부족' 경고로 남긴다(넘겨받지 못한 값은 한방단어로
+    잘못 단정하지 않도록 판정에서 빠진다). 이미 시작한 조회는 배경에서
+    계속 끝나지만 결과는 버린다.
     """
     unique = [syllable for syllable in dict.fromkeys(syllables) if syllable]
     counts: dict[str, tuple[int, list[str]]] = {}
@@ -633,19 +645,25 @@ def fast_continuation_counts(
         return counts, []
 
     def run(subset: list[str], slow: bool) -> None:
-        with ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(subset))) as executor:
-            futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum, False, slow): syllable for syllable in subset}
-            for future in as_completed(futures):
-                syllable = futures[future]
-                try:
-                    counts[syllable] = future.result()
-                except Exception:
-                    counts[syllable] = (0, [f"'{syllable}' 이어갈 단어 수를 확인하지 못했습니다."])
+        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        executor = ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(subset)))
+        futures = {executor.submit(continuation_count, dictionaries, syllable, filters, dueum, False, slow): syllable for syllable in subset}
+        done, not_done = wait(futures, timeout=remaining)
+        for future in done:
+            syllable = futures[future]
+            try:
+                counts[syllable] = future.result()
+            except Exception:
+                counts[syllable] = (0, [f"'{syllable}' 이어갈 단어 수를 확인하지 못했습니다."])
+        for future in not_done:
+            counts[futures[future]] = (0, [ONE_SHOT_TIME_BUDGET_WARNING])
+        executor.shutdown(wait=False, cancel_futures=True)
 
     run(unique, False)
-    retry_syllables = [syllable for syllable, (_count, notes) in counts.items() if notes][:12]
-    if retry_syllables:
-        run(retry_syllables, patient_retry)
+    if deadline is None or time.monotonic() < deadline:
+        retry_syllables = [syllable for syllable, (_count, notes) in counts.items() if notes][:12]
+        if retry_syllables:
+            run(retry_syllables, patient_retry)
     warnings: list[str] = []
     for _syllable, (_count, notes) in counts.items():
         warnings.extend(notes)
@@ -674,6 +692,7 @@ def analyse_words(
     dueum: bool,
     exact_counts: bool = True,
     fast_all_counts: bool = False,
+    deadline: float | None = None,
 ) -> tuple[list[dict], list[str]]:
     if not exact_counts:
         if fast_all_counts:
@@ -684,7 +703,7 @@ def analyse_words(
                 for word in candidates
                 if last_hangul_syllable(word["word"]) in RARE_FINALS
             }
-        counts, _count_warnings = fast_continuation_counts(dictionaries, uncertain_syllables, filters, dueum)
+        counts, _count_warnings = fast_continuation_counts(dictionaries, uncertain_syllables, filters, dueum, deadline=deadline)
         warnings = []
         analysed = []
         for word in candidates:
@@ -794,6 +813,7 @@ def paged_search_with_dueum(dictionaries: list[str], query: str, filters: Filter
 
 def collect_matching_words(
     dictionaries: list[str], query: str, filters: Filters, cap: int = ONE_SHOT_SCAN_CAP,
+    deadline: float | None = None,
 ) -> tuple[list[dict], int, list[str]]:
     """검색어로 시작하는 단어를 사전마다 최대 cap개까지 실제로 모두 가져온다.
 
@@ -830,6 +850,9 @@ def collect_matching_words(
         starts = list(range(2, max_batch + 1))
         if not starts:
             continue
+        if deadline is not None and time.monotonic() >= deadline:
+            warnings.append(ONE_SHOT_TIME_BUDGET_WARNING)
+            continue
 
         def probe(start: int) -> tuple[list[dict], list[str]]:
             try:
@@ -851,7 +874,9 @@ def collect_matching_words(
     return list(merged.values()), raw_total, list(dict.fromkeys(warnings))
 
 
-def gather_one_shot_candidates(dictionaries: list[str], query: str, filters: Filters, dueum: bool) -> tuple[list[dict], int, list[str]]:
+def gather_one_shot_candidates(
+    dictionaries: list[str], query: str, filters: Filters, dueum: bool, deadline: float | None = None,
+) -> tuple[list[dict], int, list[str]]:
     """한방단어 후보 전체를 모은다(판정 전). 검색어(와 두음 변형)로 시작하는 단어를
     실제로 넓게 가져와 후보로 삼는다. 어떤 받침으로 끝나든 analyse_words가 그대로
     판정하므로, 손으로 정해둔 '희귀 받침 목록'에 없는 단어도 놓치지 않는다.
@@ -861,7 +886,7 @@ def gather_one_shot_candidates(dictionaries: list[str], query: str, filters: Fil
     starting_total = 0
     warnings: list[str] = []
     for search_query in queries:
-        words, total, notes = collect_matching_words(dictionaries, search_query, filters)
+        words, total, notes = collect_matching_words(dictionaries, search_query, filters, deadline=deadline)
         starting_total += total
         warnings.extend(notes)
         for word in words:
@@ -875,20 +900,29 @@ def gather_one_shot_words(dictionaries: list[str], query: str, filters: Filters,
     넓게 모은 후보 + 한방 판정을 모두 거친 결과를 (한방단어 목록, 시작 단어
     총계, 경고)로 돌려준다. 페이지와 무관한 값이므로 (검색어, 사전들, 필터,
     두음)으로 캐시하고, 라우트는 이 목록을 페이지 크기로 잘라서 보여 준다.
+
+    전체 과정은 `ONE_SHOT_TIME_BUDGET`(20초) 안에서만 진행한다. 실 서비스
+    앞단이 응답을 약 30초에서 끊는 걸 확인했기 때문이다(2026-09-15). 시간이
+    부족해 일부만 확인했으면 그 결과는 캐시하지 않는다 — 다음 검색이 그새
+    데워진 캐시(사전 API 응답 캐시는 검색어와 무관하게 공유됨)를 타고 더
+    많이 확인할 수 있도록 남겨 둔다.
     """
     cache_key = ("one_shot_full", query, tuple(dictionaries), filters.key(), dueum)
     cached = cache.get(cache_key)
     if cached is not None:
         return copy.deepcopy(cached)
 
-    candidates, starting_total, warnings = gather_one_shot_candidates(dictionaries, query, filters, dueum)
+    deadline = time.monotonic() + ONE_SHOT_TIME_BUDGET
+    candidates, starting_total, warnings = gather_one_shot_candidates(dictionaries, query, filters, dueum, deadline=deadline)
     analysed, notes = analyse_words(
-        dictionaries, candidates, filters, dueum, exact_counts=False, fast_all_counts=True,
+        dictionaries, candidates, filters, dueum, exact_counts=False, fast_all_counts=True, deadline=deadline,
     )
     warnings.extend(notes)
     one_shots = [word for word in analysed if word["is_one_shot"]]
-    result = (one_shots, starting_total, list(dict.fromkeys(warnings)))
-    cache.set(cache_key, result)
+    warnings = list(dict.fromkeys(warnings))
+    result = (one_shots, starting_total, warnings)
+    if ONE_SHOT_TIME_BUDGET_WARNING not in warnings:
+        cache.set(cache_key, result)
     return copy.deepcopy(result)
 
 

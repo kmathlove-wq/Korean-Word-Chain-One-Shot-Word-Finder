@@ -460,6 +460,50 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(total, 250)
         self.assertEqual(words, [])
 
+    def test_collect_matching_words_skips_extra_batches_past_deadline(self):
+        # 회귀 테스트(2026-09-15): 배포된 사이트에서 흔한 글자 검색이 30초
+        # 넘게 걸려 502가 나는 걸 직접 재현해 확인한 뒤 만든 안전장치.
+        def fake_fetch(_dictionary, _query, start, _count, _filters, method="start", **_kwargs):
+            page_words = [
+                app.normalize_item({"word": f"단어{start}-{i}", "sense": {"pos": "명사"}}, "stdict")
+                for i in range(100)
+            ]
+            return page_words, 500
+
+        with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
+            words, total, warnings = app.collect_matching_words(
+                ["stdict"], "단", app.Filters(), deadline=time.monotonic() - 1,
+            )
+        self.assertEqual(total, 500)
+        self.assertEqual(len(words), 100)  # 첫 묶음만, 나머지는 시간 부족으로 건너뜀
+        self.assertIn(app.ONE_SHOT_TIME_BUDGET_WARNING, warnings)
+
+    def test_fast_continuation_counts_marks_unstarted_lookups_as_time_short(self):
+        # 목(mock) 호출이 즉시 끝나 버리면 wait(timeout=0)이 우연히 "이미 끝남"으로
+        # 볼 수 있으므로, 아주 짧게 멈춰서 시간 부족 경로를 확실히 타게 한다.
+        def slow_count(*_args, **_kwargs):
+            time.sleep(0.05)
+            return (0, [])
+
+        with patch.object(app, "continuation_count", side_effect=slow_count):
+            counts, warnings = app.fast_continuation_counts(
+                ["stdict"], ["가", "나"], app.Filters(), True, deadline=time.monotonic() - 1,
+            )
+        self.assertEqual(counts["가"], (0, [app.ONE_SHOT_TIME_BUDGET_WARNING]))
+        self.assertEqual(counts["나"], (0, [app.ONE_SHOT_TIME_BUDGET_WARNING]))
+        self.assertIn(app.ONE_SHOT_TIME_BUDGET_WARNING, warnings)
+
+    def test_one_shot_words_not_cached_when_time_budget_exceeded(self):
+        word = app.normalize_item({"word": "단어", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "gather_one_shot_candidates", return_value=([word], 1, [app.ONE_SHOT_TIME_BUDGET_WARNING])) as gather, \
+             patch.object(app, "continuation_count", return_value=(0, [])):
+            first = app.gather_one_shot_words(["stdict"], "단", app.Filters(), True)
+            second = app.gather_one_shot_words(["stdict"], "단", app.Filters(), True)
+            # 캐시됐다면 두 번째 호출은 gather_one_shot_candidates를 다시 부르지 않았을 것이다.
+            self.assertEqual(gather.call_count, 2)
+        self.assertIn(app.ONE_SHOT_TIME_BUDGET_WARNING, first[2])
+        self.assertIn(app.ONE_SHOT_TIME_BUDGET_WARNING, second[2])
+
     def test_failed_fast_count_is_marked_unavailable_after_retry(self):
         candidate = app.normalize_item({"word": "는개", "sense": {"pos": "명사"}}, "stdict")
         with patch.object(app, "continuation_count", return_value=(0, ["응답 지연"])) as count:
