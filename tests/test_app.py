@@ -436,6 +436,18 @@ class HelperTests(unittest.TestCase):
         self.assertEqual([w["word"] for w in words], ["단하나"])
         fetch.assert_called_once()
 
+    def test_collect_matching_words_uses_fast_timeout_and_single_attempt(self):
+        # 회귀 테스트(2026-09-15): 기본 제한 시간(연결 10초·응답 20초·2회 재시도)을
+        # 쓰면 흔한 글자는 묶음 하나만 느려져도 전체가 운영 서버 제한 시간을
+        # 넘겨 502가 났다(실 서비스에서 확인). 짧은 제한 시간·1회 시도만 써야 한다.
+        def fake_fetch(_dictionary, _query, start, _count, _filters, method="start", **kwargs):
+            self.assertEqual(kwargs.get("request_timeout"), app.FAST_REQUEST_TIMEOUT)
+            self.assertEqual(kwargs.get("attempts"), 1)
+            return ([], 250) if start == 1 else ([], 0)
+
+        with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
+            app.collect_matching_words(["stdict"], "단", app.Filters())
+
     def test_collect_matching_words_ignores_invalid_start_value_errors(self):
         def fake_fetch(_dictionary, _query, start, _count, _filters, method="start", **_kwargs):
             if start == 1:

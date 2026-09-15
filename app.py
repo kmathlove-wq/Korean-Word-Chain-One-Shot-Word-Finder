@@ -802,13 +802,23 @@ def collect_matching_words(
     끝나는 단어는 통째로 후보에서 빠졌다(예: 차풰→풰, 치미는아픔→픔). 이 함수는
     추측 목록 없이 실제 단어 목록을 넓게 확보해 그 문제를 없앤다. 첫 묶음으로
     전체 개수를 알아낸 뒤 남은 묶음은 병렬로 가져와 느려지지 않게 한다.
+
+    묶음 조회는 다른 넓은 후보 탐색(`rare_final_candidates` 등)과 같이 짧은
+    제한 시간(`FAST_REQUEST_TIMEOUT`)·1회 시도만 쓴다. 후보가 많은 흔한 글자는
+    수십 묶음을 병렬로 불러야 하는데, 기본 제한 시간(연결 10초·응답 20초·2회
+    재시도)을 쓰면 한 묶음만 느려져도 전체가 운영 서버 제한 시간을 넘겨 502가
+    난다(2026-09-15, 실 서비스에서 확인). 느린 묶음 하나를 놓치는 것이 전체
+    검색 실패보다 낫다.
     """
     merged: dict[str, dict] = {}
     raw_total = 0
     warnings: list[str] = []
     for dictionary in dictionaries:
         try:
-            first_batch, total = fetch_dictionary(dictionary, query, 1, API_PAGE_SIZE, filters)
+            first_batch, total = fetch_dictionary(
+                dictionary, query, 1, API_PAGE_SIZE, filters,
+                request_timeout=FAST_REQUEST_TIMEOUT, attempts=1,
+            )
         except ApiError as exc:
             warnings.append(str(exc))
             continue
@@ -823,7 +833,10 @@ def collect_matching_words(
 
         def probe(start: int) -> tuple[list[dict], list[str]]:
             try:
-                words, _total = fetch_dictionary(dictionary, query, start, API_PAGE_SIZE, filters)
+                words, _total = fetch_dictionary(
+                    dictionary, query, start, API_PAGE_SIZE, filters,
+                    request_timeout=FAST_REQUEST_TIMEOUT, attempts=1,
+                )
                 return words, []
             except ApiError as exc:
                 return ([], []) if "Invalid start value" in str(exc) else ([], [str(exc)])
