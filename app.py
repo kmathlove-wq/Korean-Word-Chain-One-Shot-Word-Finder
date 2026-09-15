@@ -39,6 +39,11 @@ RARE_PROBE_DEEP_START = 10
 RARE_PROBE_SHALLOW_START = 2
 RARE_CANDIDATE_LIMIT = 120
 ONE_SHOT_ANALYSIS_LIMIT = 80
+# 한방단어 판정용 후보를 사전 한 곳에서 실제로 끝까지 살펴보는 상한. 사용자와 상의해
+# 정확도와 속도의 균형점으로 정했다(2026-09-15). 이 개수 이후에 나오는 아주 희귀한
+# 단어는 여전히 놓칠 수 있다.
+ONE_SHOT_SCAN_CAP = 3000
+ONE_SHOT_SCAN_MAX_BATCHES = -(-ONE_SHOT_SCAN_CAP // API_PAGE_SIZE)
 FAST_CONTINUATION_PAGE_SIZE = API_PAGE_SIZE
 FAST_REQUEST_TIMEOUT = (2, 3)
 # 빠른 경로 재시도용. 공식 API가 지연될 때 첫 조회(3초)에서 놓친 끝 글자를
@@ -787,74 +792,85 @@ def paged_search_with_dueum(dictionaries: list[str], query: str, filters: Filter
     return list(merged.values()), total, list(dict.fromkeys(warnings))
 
 
-def gather_one_shot_candidates(dictionaries: list[str], query: str, filters: Filters, dueum: bool) -> tuple[list[dict], int, list[str]]:
-    """한방단어 후보 묶음만 모은다(판정 전). 시작 검색 + 희귀 끝글자 역검색 + 접두 확장."""
-    candidates, starting_total, warnings = paged_search_with_dueum(dictionaries, query, filters, 1, dueum)
-    if starting_total > PAGE_SIZE:
-        rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters, deep=False)
-        warnings.extend(rare_warnings)
-        for word in rare_candidates:
-            if not any(existing["word"] == word["word"] for existing in candidates):
-                candidates.append(word)
-        expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
-        warnings.extend(expanded_warnings)
-        for word in expanded_candidates:
-            if not any(existing["word"] == word["word"] for existing in candidates):
-                candidates.append(word)
-    return sorted(candidates, key=candidate_priority), starting_total, warnings
+def collect_matching_words(
+    dictionaries: list[str], query: str, filters: Filters, cap: int = ONE_SHOT_SCAN_CAP,
+) -> tuple[list[dict], int, list[str]]:
+    """검색어로 시작하는 단어를 사전마다 최대 cap개까지 실제로 모두 가져온다.
 
-
-def gather_one_shot_first_phase(dictionaries: list[str], query: str, filters: Filters, dueum: bool) -> tuple[list[dict], list[dict], int, list[str]]:
-    """한방단어 모드 1단계: 후보를 모아 '희귀 끝글자' 후보만 빠르게 판정한다.
-
-    (확정된 한방단어[희귀 끝글자], 아직 판정 안 된 후보[비희귀 끝글자, is_one_shot=None],
-    시작 단어 총계, 경고)를 돌려준다. 화면이 2단계에서 `/api/continuations`로
-    나머지 후보의 끝글자를 확인해 한방단어를 추가한다.
+    한방단어 판정은 후보 단어들의 '진짜 마지막 글자'를 빠짐없이 알아야 정확하다.
+    예전에는 손으로 정해둔 '희귀 받침 목록'(RARE_FINALS, 20개)에 없는 받침으로
+    끝나는 단어는 통째로 후보에서 빠졌다(예: 차풰→풰, 치미는아픔→픔). 이 함수는
+    추측 목록 없이 실제 단어 목록을 넓게 확보해 그 문제를 없앤다. 첫 묶음으로
+    전체 개수를 알아낸 뒤 남은 묶음은 병렬로 가져와 느려지지 않게 한다.
     """
-    ordered, starting_total, warnings = gather_one_shot_candidates(dictionaries, query, filters, dueum)
-    rare_pool = [word for word in ordered if last_hangul_syllable(word["word"]) in RARE_FINALS]
-    other_pool = [word for word in ordered if last_hangul_syllable(word["word"]) not in RARE_FINALS]
-    analysed_rare, notes = analyse_words(dictionaries, rare_pool, filters, dueum, exact_counts=False, fast_all_counts=False)
-    warnings.extend(notes)
-    confirmed = [word for word in analysed_rare if word["is_one_shot"]]
-    pending = describe_words_without_counts(other_pool)
-    return confirmed, pending, starting_total, list(dict.fromkeys(warnings))
+    merged: dict[str, dict] = {}
+    raw_total = 0
+    warnings: list[str] = []
+    for dictionary in dictionaries:
+        try:
+            first_batch, total = fetch_dictionary(dictionary, query, 1, API_PAGE_SIZE, filters)
+        except ApiError as exc:
+            warnings.append(str(exc))
+            continue
+        raw_total += total
+        for word in first_batch:
+            merge_word(merged, word)
+        scan_target = min(total, cap)
+        max_batch = min(-(-scan_target // API_PAGE_SIZE), ONE_SHOT_SCAN_MAX_BATCHES)
+        starts = list(range(2, max_batch + 1))
+        if not starts:
+            continue
+
+        def probe(start: int) -> tuple[list[dict], list[str]]:
+            try:
+                words, _total = fetch_dictionary(dictionary, query, start, API_PAGE_SIZE, filters)
+                return words, []
+            except ApiError as exc:
+                return ([], []) if "Invalid start value" in str(exc) else ([], [str(exc)])
+
+        with ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(starts))) as executor:
+            futures = [executor.submit(probe, start) for start in starts]
+            for future in as_completed(futures):
+                words, notes = future.result()
+                warnings.extend(notes)
+                for word in words:
+                    merge_word(merged, word)
+    return list(merged.values()), raw_total, list(dict.fromkeys(warnings))
+
+
+def gather_one_shot_candidates(dictionaries: list[str], query: str, filters: Filters, dueum: bool) -> tuple[list[dict], int, list[str]]:
+    """한방단어 후보 전체를 모은다(판정 전). 검색어(와 두음 변형)로 시작하는 단어를
+    실제로 넓게 가져와 후보로 삼는다. 어떤 받침으로 끝나든 analyse_words가 그대로
+    판정하므로, 손으로 정해둔 '희귀 받침 목록'에 없는 단어도 놓치지 않는다.
+    """
+    queries = get_dueum_variants(query) if dueum and len(query) == 1 else [query]
+    merged: dict[str, dict] = {}
+    starting_total = 0
+    warnings: list[str] = []
+    for search_query in queries:
+        words, total, notes = collect_matching_words(dictionaries, search_query, filters)
+        starting_total += total
+        warnings.extend(notes)
+        for word in words:
+            merge_word(merged, word)
+    return sorted(merged.values(), key=candidate_priority), starting_total, list(dict.fromkeys(warnings))
 
 
 def gather_one_shot_words(dictionaries: list[str], query: str, filters: Filters, dueum: bool) -> tuple[list[dict], int, list[str]]:
     """한방단어 모드의 '확정된 한방단어 전체 목록'을 한 번에 모은다.
 
-    시작 검색 + 희귀 끝글자 역검색 + 접두 확장 + 한방 판정을 모두 거친
-    결과를 (한방단어 목록, 시작 단어 총계, 경고)로 돌려준다. 페이지와
-    무관한 값이므로 (검색어, 사전들, 필터, 두음)으로 캐시하고, 라우트는
-    이 목록을 페이지 크기로 잘라서 보여 준다. 더 이상 빈 페이지 반복 없음.
+    넓게 모은 후보 + 한방 판정을 모두 거친 결과를 (한방단어 목록, 시작 단어
+    총계, 경고)로 돌려준다. 페이지와 무관한 값이므로 (검색어, 사전들, 필터,
+    두음)으로 캐시하고, 라우트는 이 목록을 페이지 크기로 잘라서 보여 준다.
     """
     cache_key = ("one_shot_full", query, tuple(dictionaries), filters.key(), dueum)
     cached = cache.get(cache_key)
     if cached is not None:
         return copy.deepcopy(cached)
 
-    candidates, starting_total, warnings = paged_search_with_dueum(dictionaries, query, filters, 1, dueum)
-    if starting_total > PAGE_SIZE:
-        # 결과가 한 화면보다 많을 때만 얕은 역검색으로 뒤쪽의 희귀 후보를 보강한다.
-        rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters, deep=False)
-        warnings.extend(rare_warnings)
-        for word in rare_candidates:
-            if not any(existing["word"] == word["word"] for existing in candidates):
-                candidates.append(word)
-        expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
-        warnings.extend(expanded_warnings)
-        for word in expanded_candidates:
-            if not any(existing["word"] == word["word"] for existing in candidates):
-                candidates.append(word)
-
+    candidates, starting_total, warnings = gather_one_shot_candidates(dictionaries, query, filters, dueum)
     analysed, notes = analyse_words(
-        dictionaries,
-        sorted(candidates, key=candidate_priority),
-        filters,
-        dueum,
-        exact_counts=False,
-        fast_all_counts=True,
+        dictionaries, candidates, filters, dueum, exact_counts=False, fast_all_counts=True,
     )
     warnings.extend(notes)
     one_shots = [word for word in analysed if word["is_one_shot"]]
@@ -955,25 +971,14 @@ def search():
         dueum = as_bool("dueum", True)
         broad_sort = sort in {"one-shot", "next"} or mode == "one-shot"
         # 화면이 목록을 먼저 그린 뒤 '이어갈 단어 수'를 뒤 단계(/api/continuations)에서
-        # 채우고 싶을 때 defer_counts=1 을 보낸다. 한방단어 모드는 후보를 먼저 보여 주고
-        # 화면이 이어서 한방 여부를 확인한다. `이어갈 단어 적은 순`·`한방단어 우선`
+        # 채우고 싶을 때 defer_counts=1 을 보낸다. `이어갈 단어 적은 순`·`한방단어 우선`
         # 정렬은 개수가 정렬에 필요하므로 예전처럼 한 번에 계산한다.
-        defer_counts = as_bool("defer_counts", False) and (mode == "one-shot" or sort not in {"one-shot", "next"})
+        # 한방단어 모드는 후보 수집 자체가 실제 단어를 넓게 모으는 방식이라
+        # '희귀 끝글자만 먼저' 같은 절반짜리 1단계가 의미 없다. 항상 완전한
+        # 목록(캐시됨)을 모아 페이지 크기로 잘라서 보여 준다.
+        defer_counts = as_bool("defer_counts", False) and mode != "one-shot" and sort not in {"one-shot", "next"}
         deferred = False
-        if mode == "one-shot" and defer_counts:
-            # 1단계: 후보를 모으고 '희귀 끝글자' 후보만 빠르게 판정해 돌려준다.
-            # 나머지 후보(is_one_shot=None)는 화면이 /api/continuations 로 확인한다.
-            confirmed, pending, raw_total, warnings = gather_one_shot_first_phase(dictionaries, query, filters, dueum)
-            for word in pending:
-                word["one_shot_pending"] = True
-            analysed = confirmed + pending
-            safe_sort = sort if sort in {"alphabet", "short", "long"} else "alphabet"
-            visible = order_words(confirmed, safe_sort) + pending
-            deferred = True
-            has_more = False
-        elif mode == "one-shot":
-            # 페이지 1에서 한방단어 전체 목록을 모아 캐시하고, 이후 페이지는
-            # 그 목록을 잘라서 보여 준다. 빈 페이지 무한 반복이 사라진다.
+        if mode == "one-shot":
             full_list, raw_total, warnings = gather_one_shot_words(dictionaries, query, filters, dueum)
             analysed = full_list
             start_index, end_index = (page - 1) * PAGE_SIZE, page * PAGE_SIZE

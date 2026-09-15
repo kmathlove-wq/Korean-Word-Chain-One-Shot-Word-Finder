@@ -74,12 +74,13 @@ OPENDICT_API_KEY=우리말샘_키
 - 독립적인 끝 글자·희귀후보 조회는 `LOOKUP_WORKERS`(24)개 작업자로 병렬 처리한다(`_http` 연결 풀 크기와 맞춘다). `fast_continuation_counts()`가 실패분을 1회 재시도하며 `patient_retry`면 재시도는 긴 제한 시간(`PATIENT_FAST_TIMEOUT`)으로 한다. `analyse_words()` 빠른 경로와 `/api/continuations`가 이 함수를 공유한다.
 - 두 단계 로딩(`defer_counts=1`, `next`·`one-shot` 정렬 제외):
   - `words`/`all` 모드: `search()`가 `describe_words_without_counts()`로 단어 목록만(`deferred=true`, `next_word_count=null`) 먼저 돌려주고, 화면이 `/api/continuations`로 숫자·한방 표시를 채운다.
-  - `one-shot` 모드: `gather_one_shot_first_phase()`가 후보를 모아 희귀 끝글자(`RARE_FINALS`) 후보만 빠르게 판정해 확정 한방단어 + 나머지 후보(`one_shot_pending=true`, `is_one_shot=null`)를 돌려준다. 화면이 `/api/continuations`로 나머지를 확인해 한방이 아닌 후보 카드를 지운다. `defer_counts` 없으면 예전처럼 `gather_one_shot_words()`가 전체를 한 번에 캐시·판정한다.
+  - `one-shot` 모드: `defer_counts`를 무시한다(2026-09-15). 후보 수집(`collect_matching_words()`)이 실제 단어를 넓게 모으는 방식이라 '희귀 끝글자만 먼저' 판정하는 절반짜리 1단계가 의미 없다. 항상 `gather_one_shot_words()`가 전체를 한 번에 모아 캐시·판정하고, `deferred`는 항상 `false`다.
 - 화면 페이지 크기는 24개, 공식 API 묶음 크기는 100개다.
 - 필터로 앞쪽 결과가 모두 제거될 수 있으므로 `paged_search()`는 필요한 결과가 모일 때까지 최대 `MAX_API_SCAN`(10)묶음 × 100개 ≈ 1000개 범위에서 다음 묶음을 확인한다.
 - 메모리 `TTLCache`의 기본 만료 시간은 30분이다. 서버 재시작 시 사라진다(단일 프로세스라 모든 스레드가 공유). `fetch_dictionary()`는 캐시 원본 오염을 막으려고 항상 `copy.deepcopy`한 복사본을 돌려준다.
 - 화면에서는 표준국어대사전 또는 우리말샘 중 하나만 선택해 검색한다.
 - 한방단어 모드(`mode=one-shot`)는 `gather_one_shot_words()`가 전체 한방단어 목록을 한 번 모아 `(검색어, 사전, 필터, 두음)` 키로 캐시하고, 라우트는 그 목록을 페이지 크기로 자른다. 페이지 2 이상도 빈 결과 없이 정확히 동작한다.
+- 한방단어 후보 수집은 `collect_matching_words()`(2026-09-15 도입)가 맡는다. 검색어로 시작하는 단어를 사전 한 곳에서 최대 `ONE_SHOT_SCAN_CAP`(3000)개까지 실제로 병렬 수집하며, 손으로 정해둔 '희귀 받침 목록'(`RARE_FINALS`)을 추측하지 않는다. `rare_final_candidates()`/`prefix_expansion_candidates()`는 이제 `sort=next`·`sort=one-shot`(일반 검색 모드)와 `/api/warm` 예열에서만 쓰인다.
 
 ## 한방단어 판정
 
@@ -148,3 +149,4 @@ node --check static/main.js
 - 두음 변형 결과 수는 중복 제거된 정확한 합계가 아닐 수 있으나 한방 여부는 하나라도 존재하는지를 기준으로 한다.
 - 우리말샘 옛말의 옛한글은 사용자 지정 영역(PUA) 코드라 표준 글꼴에서 네모로 보인다. 표기는 그대로 두고 안내 문구만 붙인다.
 - 한방 판정은 선택한 사전과 필터 기준이며 실제 게임 규칙을 보장하지 않는다.
+- 한방단어 후보 수집은 사전 한 곳당 최대 `ONE_SHOT_SCAN_CAP`(3000)개까지만 실제로 살펴본다(사용자와 상의해 정확도·속도 균형점으로 정함). 시작 단어가 아주 많은 흔한 글자는 그 이후에 나오는 극히 희귀한 한방단어를 여전히 놓칠 수 있다.

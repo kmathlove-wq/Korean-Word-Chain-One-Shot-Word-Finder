@@ -123,30 +123,27 @@ class HelperTests(unittest.TestCase):
     def test_response_merges_duplicate_headwords_even_when_metadata_differs(self):
         duplicate_a = app.normalize_item({"word": "인듐", "sense": {"pos": "명사", "definition": "은백색의 무른 금속 원소."}}, "stdict")
         duplicate_b = app.normalize_item({"word": "인듐", "sense": {"pos": "품사 없음", "definition": "은백색의 무른 금속 원소. "}}, "stdict")
-        with patch.object(app, "paged_search", return_value=([], 25, [])), \
-             patch.object(app, "rare_final_candidates", return_value=([duplicate_a, duplicate_b], [])), \
-             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
+        with patch.object(app, "collect_matching_words", return_value=([duplicate_a, duplicate_b], 25, [])), \
              patch.object(app, "continuation_count", return_value=(0, [])):
             response = app.app.test_client().get("/api/search?query=인&dictionary=stdict&mode=one-shot&sort=alphabet")
         self.assertEqual(response.status_code, 200)
         self.assertEqual([word["word"] for word in response.json["words"]], ["인듐"])
 
-    def test_one_shot_mode_combines_prefix_and_other_rare_final_families(self):
+    def test_one_shot_mode_finds_words_regardless_of_ending_syllable(self):
+        # 예전에는 '희귀 받침 목록'(RARE_FINALS)에 있는 받침(릎, 륨)만 후보로
+        # 뽑았다. 이제는 실제로 모은 후보라면 어떤 받침이든 판정한다.
         knee = app.normalize_item({"word": "무릎", "sense": {"pos": "명사", "definition": "넓적다리와 정강이 사이."}}, "stdict")
         sodium = app.normalize_item({"word": "무수탄산나트륨", "sense": {"pos": "품사 없음", "definition": "탄산 나트륨 무수물."}}, "stdict")
 
         def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True, _slow=False):
             return (0, []) if syllable in {"릎", "륨"} else (10, [])
 
-        with patch.object(app, "paged_search", return_value=([], 3449, [])), \
-             patch.object(app, "rare_final_candidates", return_value=([knee], [])) as rare, \
-             patch.object(app, "prefix_expansion_candidates", return_value=([sodium], [])), \
+        with patch.object(app, "collect_matching_words", return_value=([knee, sodium], 3449, [])), \
              patch.object(app, "continuation_count", side_effect=count_for_syllable):
             response = app.app.test_client().get("/api/search?query=무&dictionary=stdict&mode=one-shot&sort=alphabet&dueum=false")
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual([word["word"] for word in response.json["words"]], ["무릎", "무수탄산나트륨"])
-        rare.assert_called_once()
 
     def test_next_sort_uses_fast_continuation_counts_for_all_syllables(self):
         many = app.normalize_item({"word": "장가", "sense": {"pos": "명사"}}, "stdict")
@@ -252,18 +249,18 @@ class HelperTests(unittest.TestCase):
 
     def test_one_shot_mode_uses_broader_fast_search(self):
         shot = app.normalize_item({"word": "가슘", "sense": {"pos": "명사"}}, "stdict")
-        with patch.object(app, "paged_search", return_value=([shot], 1, [])) as paged, \
-             patch.object(app, "rare_final_candidates", return_value=([], [])), \
+        with patch.object(app, "collect_matching_words", return_value=([shot], 1, [])) as collect, \
              patch.object(app, "continuation_count", return_value=(0, [])):
             response = app.app.test_client().get("/api/search?query=가&dictionary=stdict&mode=one-shot&sort=alphabet")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["words"][0]["word"], "가슘")
-        paged.assert_called_once()
+        collect.assert_called_once()
 
     def test_one_shot_mode_checks_unlisted_final_and_excludes_single_follow_word(self):
+        # 회귀 테스트: '녘'은 희귀 받침 추측 목록에 없었지만 실제 한방단어일 수 있다.
         sunset = app.normalize_item({"word": "섯녘", "sense": {"pos": "명사"}}, "opendict")
-        with patch.object(app, "paged_search", return_value=([sunset], 1, [])), \
-             patch.object(app, "rare_final_candidates") as rare, \
+        self.assertNotIn(app.last_hangul_syllable("섯녘"), app.RARE_FINALS)
+        with patch.object(app, "collect_matching_words", return_value=([sunset], 1, [])), \
              patch.object(app, "continuation_count", return_value=(0, [])) as count:
             response = app.app.test_client().get(
                 "/api/search?query=섯&dictionary=opendict&mode=one-shot&sort=alphabet&noun_only=true&include_single=false"
@@ -273,7 +270,22 @@ class HelperTests(unittest.TestCase):
         self.assertTrue(response.json["words"][0]["is_one_shot"])
         self.assertEqual(response.json["words"][0]["next_word_count"], 0)
         self.assertEqual(count.call_args.args[1], "녘")
-        rare.assert_not_called()
+
+    def test_one_shot_mode_finds_word_with_ending_missing_from_rare_final_list(self):
+        # 회귀 테스트(2026-09-15): '풰'로 끝나는 '차풰'는 시작 단어가 2552개라
+        # 예전 방식(희귀 받침 20개 추측 목록)이 후보 확장을 시도했지만 '풰'가
+        # 그 목록에 없어 통째로 놓쳤다. 이제는 실제로 모은 후보라서 놓치지 않는다.
+        surprise = app.normalize_item({"word": "차풰", "sense": {"pos": "명사", "definition": "'차표'의 방언."}}, "opendict")
+        self.assertNotIn(app.last_hangul_syllable("차풰"), app.RARE_FINALS)
+        with patch.object(app, "collect_matching_words", return_value=([surprise], 2552, [])), \
+             patch.object(app, "continuation_count", return_value=(0, [])) as count:
+            response = app.app.test_client().get(
+                "/api/search?query=차&dictionary=opendict&mode=one-shot&sort=alphabet&dueum=false"
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual([word["word"] for word in response.json["words"]], ["차풰"])
+        self.assertTrue(response.json["words"][0]["is_one_shot"])
+        self.assertEqual(count.call_args.args[1], "풰")
 
     def test_prefix_expansion_skips_generic_probes_without_rare_seed(self):
         common = app.normalize_item({"word": "표가", "sense": {"pos": "명사"}}, "opendict")
@@ -283,38 +295,14 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(warnings, [])
         fetch.assert_not_called()
 
-    def test_one_shot_mode_uses_direct_rare_final_candidates(self):
-        shot = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "opendict")
-        with patch.object(app, "paged_search", return_value=([], 2911, [])), \
-             patch.object(app, "rare_final_candidates", return_value=([shot], [])) as rare, \
-             patch.object(app, "continuation_count", return_value=(0, [])):
-            response = app.app.test_client().get("/api/search?query=리&dictionary=opendict&mode=one-shot&sort=alphabet")
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual([word["word"] for word in response.json["words"]], ["리튬"])
-        rare.assert_called_once()
-
-    def test_one_shot_total_includes_direct_rare_candidates(self):
+    def test_one_shot_total_reflects_starting_total_from_collected_words(self):
         shot = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
-        with patch.object(app, "paged_search", return_value=([shot], 1, [])), \
-             patch.object(app, "rare_final_candidates") as rare, \
+        with patch.object(app, "collect_matching_words", return_value=([shot], 1, [])), \
              patch.object(app, "continuation_count", return_value=(0, [])):
             response = app.app.test_client().get("/api/search?query=리&dictionary=stdict&mode=one-shot&sort=alphabet&dueum=false")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["total"], 1)
         self.assertEqual(response.json["one_shot_count"], 1)
-        rare.assert_not_called()
-
-    def test_one_shot_mode_expands_rare_candidate_prefixes(self):
-        seed = app.normalize_item({"word": "수산화카드뮴", "sense": {"pos": "품사 미상"}}, "opendict")
-        sodium = app.normalize_item({"word": "수산화나트륨", "sense": {"pos": "품사 미상"}}, "opendict")
-        with patch.object(app, "paged_search", return_value=([seed], 12651, [])), \
-             patch.object(app, "rare_final_candidates", return_value=([], [])), \
-             patch.object(app, "prefix_expansion_candidates", return_value=([sodium], [])) as expand, \
-             patch.object(app, "continuation_count", return_value=(0, [])):
-            response = app.app.test_client().get("/api/search?query=수&dictionary=opendict&mode=one-shot&sort=alphabet&noun_only=true&include_technical=true&dueum=false")
-        self.assertEqual(response.status_code, 200)
-        self.assertIn("수산화나트륨", [word["word"] for word in response.json["words"]])
-        expand.assert_called_once()
 
     def test_prefix_expansion_finds_hidden_same_family_rare_word(self):
         seed = app.normalize_item({"word": "수산화카드뮴", "sense": {"pos": "품사 미상"}}, "opendict")
@@ -421,6 +409,45 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(first_total, 28)
         self.assertEqual(second_total, 28)
 
+    # --- 조각 A 회귀 테스트: 한방단어 후보를 '희귀 받침 추측' 없이 실제로 모으기 ---
+    def test_collect_matching_words_paginates_up_to_cap_in_parallel(self):
+        def fake_fetch(_dictionary, _query, start, _count, _filters, method="start", **_kwargs):
+            page_words = [
+                app.normalize_item({"word": f"단어{start}-{i}", "sense": {"pos": "명사"}}, "stdict")
+                for i in range(100)
+            ]
+            return page_words, 250
+
+        with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
+            words, total, warnings = app.collect_matching_words(["stdict"], "단", app.Filters(), cap=150)
+        self.assertEqual(warnings, [])
+        self.assertEqual(total, 250)
+        # cap=150 -> 100개씩 2묶음(200개)까지만 가져오고 3묶음째는 보지 않는다.
+        self.assertEqual(len(words), 200)
+
+    def test_collect_matching_words_stops_at_actual_total_below_cap(self):
+        def fake_fetch(_dictionary, _query, start, _count, _filters, method="start", **_kwargs):
+            return ([app.normalize_item({"word": "단하나", "sense": {"pos": "명사"}}, "stdict")], 1) if start == 1 else ([], 1)
+
+        with patch.object(app, "fetch_dictionary", side_effect=fake_fetch) as fetch:
+            words, total, warnings = app.collect_matching_words(["stdict"], "단", app.Filters())
+        self.assertEqual(warnings, [])
+        self.assertEqual(total, 1)
+        self.assertEqual([w["word"] for w in words], ["단하나"])
+        fetch.assert_called_once()
+
+    def test_collect_matching_words_ignores_invalid_start_value_errors(self):
+        def fake_fetch(_dictionary, _query, start, _count, _filters, method="start", **_kwargs):
+            if start == 1:
+                return [], 250
+            raise app.ApiError("Invalid start value")
+
+        with patch.object(app, "fetch_dictionary", side_effect=fake_fetch):
+            words, total, warnings = app.collect_matching_words(["stdict"], "단", app.Filters())
+        self.assertEqual(warnings, [])
+        self.assertEqual(total, 250)
+        self.assertEqual(words, [])
+
     def test_failed_fast_count_is_marked_unavailable_after_retry(self):
         candidate = app.normalize_item({"word": "는개", "sense": {"pos": "명사"}}, "stdict")
         with patch.object(app, "continuation_count", return_value=(0, ["응답 지연"])) as count:
@@ -513,9 +540,7 @@ class HelperTests(unittest.TestCase):
             app.normalize_item({"word": f"리가{index:02d}", "sense": {"pos": "명사"}}, "stdict")
             for index in range(30)
         ]
-        with patch.object(app, "paged_search", return_value=(words, 5000, [])), \
-             patch.object(app, "rare_final_candidates", return_value=([], [])), \
-             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
+        with patch.object(app, "collect_matching_words", return_value=(words, 5000, [])), \
              patch.object(app, "continuation_count", return_value=(0, [])):
             first = app.app.test_client().get(
                 "/api/search?query=리&dictionary=stdict&mode=one-shot&sort=alphabet&dueum=false&page=1"
@@ -530,9 +555,7 @@ class HelperTests(unittest.TestCase):
         self.assertFalse(second.json["has_more"])
 
     def test_one_shot_mode_no_empty_page_with_more_when_list_exhausted(self):
-        with patch.object(app, "paged_search", return_value=([], 12651, [])), \
-             patch.object(app, "rare_final_candidates", return_value=([], [])), \
-             patch.object(app, "prefix_expansion_candidates", return_value=([], [])):
+        with patch.object(app, "collect_matching_words", return_value=([], 12651, [])):
             response = app.app.test_client().get(
                 "/api/search?query=수&dictionary=opendict&mode=one-shot&sort=alphabet"
             )
@@ -610,24 +633,22 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json["counts"], {})
 
-    def test_one_shot_mode_deferred_confirms_rare_and_defers_others(self):
+    def test_one_shot_mode_ignores_defer_counts_and_returns_full_list(self):
+        # 후보 수집 자체가 이제 실제 단어를 넓게 모으는 방식이라 '희귀 끝글자만
+        # 먼저' 판정하는 절반짜리 1단계가 의미 없다. defer_counts=1이 와도
+        # 한방단어 모드는 항상 완전히 판정된 목록을 한 번에 돌려준다.
         lithium = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
         common = app.normalize_item({"word": "리본", "sense": {"pos": "명사"}}, "stdict")
-        with patch.object(app, "paged_search", return_value=([lithium, common], 5000, [])), \
-             patch.object(app, "rare_final_candidates", return_value=([], [])), \
-             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
-             patch.object(app, "continuation_count", return_value=(0, [])) as count:
+        def count_for_syllable(_dictionaries, syllable, _filters, _dueum, _exact=True, _slow=False):
+            return (0, []) if syllable == "튬" else (5, [])
+        with patch.object(app, "collect_matching_words", return_value=([lithium, common], 5000, [])), \
+             patch.object(app, "continuation_count", side_effect=count_for_syllable):
             response = app.app.test_client().get(
                 "/api/search?query=리&dictionary=stdict&mode=one-shot&sort=alphabet&dueum=false&defer_counts=1"
             )
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json["deferred"])
-        by_word = {w["word"]: w for w in response.json["words"]}
-        self.assertTrue(by_word["리튬"]["is_one_shot"])
-        self.assertIsNone(by_word["리본"]["is_one_shot"])
-        self.assertTrue(by_word["리본"]["one_shot_pending"])
-        # 1단계에서는 희귀 끝글자만 판정한다("튬"만, "본"은 화면이 이어서 확인).
-        self.assertEqual([c.args[1] for c in count.call_args_list], ["튬"])
+        self.assertFalse(response.json["deferred"])
+        self.assertEqual([w["word"] for w in response.json["words"]], ["리튬"])
 
     def test_warm_route_returns_warming_status(self):
         response = app.app.test_client().get("/api/warm")
@@ -644,8 +665,7 @@ class HelperTests(unittest.TestCase):
 
     def test_one_shot_mode_without_defer_still_returns_full_list(self):
         lithium = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
-        with patch.object(app, "paged_search", return_value=([lithium], 1, [])), \
-             patch.object(app, "rare_final_candidates") as rare, \
+        with patch.object(app, "collect_matching_words", return_value=([lithium], 1, [])), \
              patch.object(app, "continuation_count", return_value=(0, [])):
             response = app.app.test_client().get(
                 "/api/search?query=리&dictionary=stdict&mode=one-shot&sort=alphabet&dueum=false"
@@ -653,7 +673,6 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json["deferred"])
         self.assertEqual([w["word"] for w in response.json["words"]], ["리튬"])
-        rare.assert_not_called()
 
 
 if __name__ == "__main__":

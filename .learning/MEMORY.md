@@ -9,7 +9,8 @@
 - 첫 검색이 느린 원인(측정): 단어 목록은 2~3초면 오지만 카드마다 '이어갈 단어 수'를 세느라 국립국어원에 수십 번 물어봄. 캐시가 차면 0.3초.
 - 두 단계 로딩(`defer_counts=1`, `next`·`one-shot` 정렬만 제외):
   - `words`/`all`: `search()`가 `describe_words_without_counts()`로 목록만 먼저(`deferred=true`), 화면 `fillDeferredCounts()`가 `GET /api/continuations`로 숫자·한방 뱃지를 채움.
-  - `one-shot` 모드: `gather_one_shot_first_phase()`가 후보를 모아 `RARE_FINALS` 끝글자만 빠르게 판정(확정) + 나머지 후보(`one_shot_pending=true`)를 반환. 화면이 2단계로 나머지 확인 후 한방 아닌 카드 제거. `defer_counts` 없으면 `gather_one_shot_words()` 전체 캐시 경로 그대로.
+  - `one-shot` 모드(2026-09-15부터): `defer_counts`를 무시하고 항상 `gather_one_shot_words()` 전체 캐시 경로. `gather_one_shot_first_phase()`는 삭제됨.
+- (2026-09-15, 사용자 신고로 발견) `RARE_FINALS`(희귀 받침 20개 추측 목록)로 한방단어 후보를 좁히던 예전 방식은 근본적으로 불완전했다: 그 목록에 없는 받침(퓌/풰, 픔 등)으로 끝나면 시작 총계가 24개보다 클 때 후보에서 통째로 빠졌다(차풰, 치미는아픔을 놓친 실제 사례). 고치면서 `collect_matching_words()`를 새로 만들어 검색어로 시작하는 단어를 사전 한 곳당 `ONE_SHOT_SCAN_CAP`(3000, 사용자와 상의해 정확도·속도 균형점으로 결정)까지 실제로 병렬 수집하고, 나오는 모든 마지막 글자를 `analyse_words(fast_all_counts=True)`가 그대로 판정하게 바꿨다. `rare_final_candidates`/`prefix_expansion_candidates`는 이제 `sort=next`·`sort=one-shot`(일반 검색 모드)와 `/api/warm` 예열에서만 쓴다. 앞으로 "받침을 미리 추측해 후보를 좁히는" 방식을 다시 도입하면 같은 종류의 누락이 재발한다.
 - 끝 글자 병렬 조회는 `fast_continuation_counts()`로 통일(= `analyse_words` 빠른 경로 + `/api/continuations` 공유). `patient_retry`면 재시도를 `PATIENT_FAST_TIMEOUT(3,6)`로. `LOOKUP_WORKERS=24`, `rare_final_candidates`/`prefix_expansion_candidates`도 같은 작업자 수. 연결은 공유 `_http = requests.Session()`.
 - `/api/continuations` 는 한 요청에 끝 글자를 많이(20+) 넣고 NIKL이 크게 지연되면 gunicorn 60초 제한을 넘겨 502가 난다. 화면 `fillDeferredCounts()`가 8개씩 잘게 나눠 병렬 호출하고 실패분만 backoff(0·1.5·3·5초)로 재시도한다. 서버 `CONTINUATION_SYLLABLE_LIMIT=60`은 안전장치.
 - 첫 한방단어 검색 예열: `GET /api/warm` → 백그라운드로 `rare_final_candidates`의 '끝일치' fetch 캐시를 채움(검색어 무관). 화면이 페이지 로드 시 0·1.5·4초에 3회 호출(워커 2개라 프로세스별 캐시 대비). `_last_warm` 가드(CACHE_TTL/2).
