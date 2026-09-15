@@ -44,12 +44,14 @@ ONE_SHOT_ANALYSIS_LIMIT = 80
 # 단어는 여전히 놓칠 수 있다.
 ONE_SHOT_SCAN_CAP = 3000
 ONE_SHOT_SCAN_MAX_BATCHES = -(-ONE_SHOT_SCAN_CAP // API_PAGE_SIZE)
-# 한방단어 모드 전체(후보 수집 + 판정)에 쓸 수 있는 최대 시간. 실 서비스(Render)
-# 앞단이 응답을 약 30~32초에서 끊는 걸 직접 재현해 확인했다(2026-09-15). 그
-# 한도를 넘기지 않도록 여유를 두고 20초로 잡는다. 넘기면 그때까지 확인한
-# 결과만 돌려주고, 나머지는 다음 검색(캐시가 데워져 더 빨라짐)에 맡긴다.
-ONE_SHOT_TIME_BUDGET = 20.0
-ONE_SHOT_TIME_BUDGET_WARNING = "시간이 부족해 일부 후보를 확인하지 못했습니다. 같은 글자로 다시 검색하면 이어서 더 찾아냅니다."
+# 검색 요청 하나에 쓸 수 있는 최대 시간(한방단어 모드, 이어갈 단어 적은
+# 순·한방단어 우선 정렬, /api/continuations 모두 공통). 실 서비스(Render)
+# 앞단이 응답을 약 30~32초에서 끊는 걸 직접 재현해 확인했고(2026-09-15),
+# 사용자 요청으로 10초 이내 응답을 목표로 8초까지 더 줄였다(2026-09-15,
+# 기기·필터와 무관하게 적용). 넘기면 그때까지 확인한 결과만 돌려주고,
+# 나머지는 다음 검색(캐시가 데워져 더 빨라짐)에 맡긴다.
+REQUEST_TIME_BUDGET = 8.0
+REQUEST_TIME_BUDGET_WARNING = "시간이 부족해 일부 후보를 확인하지 못했습니다. 같은 글자로 다시 검색하면 이어서 더 찾아냅니다."
 FAST_CONTINUATION_PAGE_SIZE = API_PAGE_SIZE
 FAST_REQUEST_TIMEOUT = (2, 3)
 # 빠른 경로 재시도용. 공식 API가 지연될 때 첫 조회(3초)에서 놓친 끝 글자를
@@ -440,8 +442,15 @@ def rare_final_candidates(
     query: str,
     filters: Filters,
     deep: bool = True,
+    deadline: float | None = None,
 ) -> tuple[list[dict], list[str]]:
-    """희귀 끝글자로 끝나는 단어를 역으로 찾아 한방 후보를 보강한다."""
+    """희귀 끝글자로 끝나는 단어를 역으로 찾아 한방 후보를 보강한다.
+
+    `deadline`(`time.monotonic()` 기준 시각)을 주면 그 시각을 넘기지 않는다
+    (2026-09-15, 모든 검색 응답을 `REQUEST_TIME_BUDGET` 안에 마치기 위한
+    안전장치). 아직 시작 못 한 조회는 포기하고, 이미 실행 중인 조회는
+    배경에서 계속 끝나되 결과는 버린다.
+    """
     merged: dict[str, dict] = {}
     warnings = []
 
@@ -469,17 +478,21 @@ def rare_final_candidates(
     def collect(jobs: list[tuple[str, str, str, int]]) -> bool:
         if not jobs:
             return False
-        with ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(jobs))) as executor:
-            futures = [executor.submit(probe, job) for job in dict.fromkeys(jobs)]
-            for future in as_completed(futures):
-                words, notes = future.result()
-                warnings.extend(notes)
-                for word in words:
-                    if not word["word"].startswith(query) or last_hangul_syllable(word["word"]) not in RARE_FINALS:
-                        continue
-                    merge_word(merged, word)
-                    if len(merged) >= RARE_CANDIDATE_LIMIT:
-                        return True
+        unique_jobs = list(dict.fromkeys(jobs))
+        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        executor = ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(unique_jobs)))
+        futures = {executor.submit(probe, job): job for job in unique_jobs}
+        done, not_done = wait(futures, timeout=remaining)
+        for future in done:
+            words, notes = future.result()
+            warnings.extend(notes)
+            for word in words:
+                if not word["word"].startswith(query) or last_hangul_syllable(word["word"]) not in RARE_FINALS:
+                    continue
+                merge_word(merged, word)
+        if not_done:
+            warnings.append(REQUEST_TIME_BUDGET_WARNING)
+        executor.shutdown(wait=False, cancel_futures=True)
         return bool(merged)
 
     shallow_jobs: list[tuple[str, str, str, int]] = []
@@ -494,14 +507,21 @@ def rare_final_candidates(
         shallow_jobs.extend((dictionary, word, "start", 1) for word in sorted(KNOWN_RARE_WORD_PROBES) if word.startswith(query))
 
     if deep and not collect(shallow_jobs):
-        collect(deep_jobs)
+        if deadline is None or time.monotonic() < deadline:
+            collect(deep_jobs)
     elif not deep:
         collect(shallow_jobs)
-    return list(merged.values()), list(dict.fromkeys(warnings))
+    return list(merged.values())[:RARE_CANDIDATE_LIMIT], list(dict.fromkeys(warnings))
 
 
-def prefix_expansion_candidates(dictionaries: list[str], query: str, seeds: list[dict], filters: Filters) -> tuple[list[dict], list[str]]:
-    """이미 찾은 희귀 끝글자 후보의 앞부분으로 다시 좁혀 숨은 같은 계열 후보를 찾는다."""
+def prefix_expansion_candidates(
+    dictionaries: list[str], query: str, seeds: list[dict], filters: Filters, deadline: float | None = None,
+) -> tuple[list[dict], list[str]]:
+    """이미 찾은 희귀 끝글자 후보의 앞부분으로 다시 좁혀 숨은 같은 계열 후보를 찾는다.
+
+    `deadline`을 주면 그 시각을 넘기지 않는다(`rare_final_candidates`와 같은
+    안전장치, 2026-09-15).
+    """
     prefixes: list[str] = []
     has_rare_seed = any(
         word["word"].startswith(query) and last_hangul_syllable(word["word"]) in RARE_FINALS
@@ -544,21 +564,20 @@ def prefix_expansion_candidates(dictionaries: list[str], query: str, seeds: list
         for api_start in range(1, PREFIX_EXPANSION_SCAN_LIMIT + 1)
     ]
     if jobs:
-        with ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(jobs))) as executor:
-            futures = [executor.submit(probe, job) for job in jobs]
-            for future in as_completed(futures):
-                batch, notes = future.result()
-                warnings.extend(notes)
-                for word in batch:
-                    if not word["word"].startswith(query) or last_hangul_syllable(word["word"]) not in RARE_FINALS:
-                        continue
-                    merge_word(merged, word)
-                    if len(merged) >= RARE_CANDIDATE_LIMIT:
-                        break
-                if len(merged) >= RARE_CANDIDATE_LIMIT:
-                    for pending in futures:
-                        pending.cancel()
-                    break
+        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        executor = ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(jobs)))
+        futures = {executor.submit(probe, job): job for job in jobs}
+        done, not_done = wait(futures, timeout=remaining)
+        for future in done:
+            batch, notes = future.result()
+            warnings.extend(notes)
+            for word in batch:
+                if not word["word"].startswith(query) or last_hangul_syllable(word["word"]) not in RARE_FINALS:
+                    continue
+                merge_word(merged, word)
+        if not_done:
+            warnings.append(REQUEST_TIME_BUDGET_WARNING)
+        executor.shutdown(wait=False, cancel_futures=True)
     return list(merged.values())[:RARE_CANDIDATE_LIMIT], list(dict.fromkeys(warnings))
 
 
@@ -656,7 +675,7 @@ def fast_continuation_counts(
             except Exception:
                 counts[syllable] = (0, [f"'{syllable}' 이어갈 단어 수를 확인하지 못했습니다."])
         for future in not_done:
-            counts[futures[future]] = (0, [ONE_SHOT_TIME_BUDGET_WARNING])
+            counts[futures[future]] = (0, [REQUEST_TIME_BUDGET_WARNING])
         executor.shutdown(wait=False, cancel_futures=True)
 
     run(unique, False)
@@ -851,7 +870,7 @@ def collect_matching_words(
         if not starts:
             continue
         if deadline is not None and time.monotonic() >= deadline:
-            warnings.append(ONE_SHOT_TIME_BUDGET_WARNING)
+            warnings.append(REQUEST_TIME_BUDGET_WARNING)
             continue
 
         def probe(start: int) -> tuple[list[dict], list[str]]:
@@ -901,18 +920,18 @@ def gather_one_shot_words(dictionaries: list[str], query: str, filters: Filters,
     총계, 경고)로 돌려준다. 페이지와 무관한 값이므로 (검색어, 사전들, 필터,
     두음)으로 캐시하고, 라우트는 이 목록을 페이지 크기로 잘라서 보여 준다.
 
-    전체 과정은 `ONE_SHOT_TIME_BUDGET`(20초) 안에서만 진행한다. 실 서비스
-    앞단이 응답을 약 30초에서 끊는 걸 확인했기 때문이다(2026-09-15). 시간이
-    부족해 일부만 확인했으면 그 결과는 캐시하지 않는다 — 다음 검색이 그새
-    데워진 캐시(사전 API 응답 캐시는 검색어와 무관하게 공유됨)를 타고 더
-    많이 확인할 수 있도록 남겨 둔다.
+    전체 과정은 `REQUEST_TIME_BUDGET`(8초) 안에서만 진행한다 — 사용자 요청으로
+    10초 이내 응답을 목표로 정했다(2026-09-15). 시간이 부족해 일부만
+    확인했으면 그 결과는 캐시하지 않는다 — 다음 검색이 그새 데워진 캐시
+    (사전 API 응답 캐시는 검색어와 무관하게 공유됨)를 타고 더 많이 확인할
+    수 있도록 남겨 둔다.
     """
     cache_key = ("one_shot_full", query, tuple(dictionaries), filters.key(), dueum)
     cached = cache.get(cache_key)
     if cached is not None:
         return copy.deepcopy(cached)
 
-    deadline = time.monotonic() + ONE_SHOT_TIME_BUDGET
+    deadline = time.monotonic() + REQUEST_TIME_BUDGET
     candidates, starting_total, warnings = gather_one_shot_candidates(dictionaries, query, filters, dueum, deadline=deadline)
     analysed, notes = analyse_words(
         dictionaries, candidates, filters, dueum, exact_counts=False, fast_all_counts=True, deadline=deadline,
@@ -921,7 +940,7 @@ def gather_one_shot_words(dictionaries: list[str], query: str, filters: Filters,
     one_shots = [word for word in analysed if word["is_one_shot"]]
     warnings = list(dict.fromkeys(warnings))
     result = (one_shots, starting_total, warnings)
-    if ONE_SHOT_TIME_BUDGET_WARNING not in warnings:
+    if REQUEST_TIME_BUDGET_WARNING not in warnings:
         cache.set(cache_key, result)
     return copy.deepcopy(result)
 
@@ -1025,6 +1044,10 @@ def search():
         # 목록(캐시됨)을 모아 페이지 크기로 잘라서 보여 준다.
         defer_counts = as_bool("defer_counts", False) and mode != "one-shot" and sort not in {"one-shot", "next"}
         deferred = False
+        # 요청 하나에 걸리는 시간이 REQUEST_TIME_BUDGET(8초)을 넘지 않도록,
+        # 이 요청에서 하는 모든 넓은 탐색·다중 판정이 같은 마감 시각을 쓴다
+        # (2026-09-15, 사용자 요청으로 기기·필터와 무관하게 10초 이내 응답 목표).
+        deadline = time.monotonic() + REQUEST_TIME_BUDGET
         if mode == "one-shot":
             full_list, raw_total, warnings = gather_one_shot_words(dictionaries, query, filters, dueum)
             analysed = full_list
@@ -1042,12 +1065,13 @@ def search():
                     query,
                     filters,
                     deep=(sort != "one-shot"),
+                    deadline=deadline,
                 )
                 warnings.extend(rare_warnings)
                 for word in rare_candidates:
                     if not any(existing["word"] == word["word"] for existing in candidates):
                         candidates.append(word)
-                expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters)
+                expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters, deadline=deadline)
                 warnings.extend(expanded_warnings)
                 for word in expanded_candidates:
                     if not any(existing["word"] == word["word"] for existing in candidates):
@@ -1062,6 +1086,7 @@ def search():
                 dueum,
                 exact_counts=False,
                 fast_all_counts=(sort == "next"),
+                deadline=deadline,
             )
             warnings.extend(notes)
             analysed = preliminary
@@ -1084,6 +1109,7 @@ def search():
                     dueum,
                     exact_counts=False,
                     fast_all_counts=True,
+                    deadline=deadline,
                 )
                 warnings.extend(count_notes)
                 visible = order_words(analysed, sort)
@@ -1112,6 +1138,7 @@ def search():
                     exact_counts=False,
                     # 일반 목록에서도 임시값 1이 아니라 마지막 글자별 API 수를 표시한다.
                     fast_all_counts=True,
+                    deadline=deadline,
                 )
                 warnings.extend(notes)
                 visible = order_words(analysed, sort)
@@ -1154,7 +1181,8 @@ def continuations():
         dueum = as_bool("dueum", True)
         if not syllables:
             return jsonify(counts={}, warnings=[])
-        counts, warnings = fast_continuation_counts(dictionaries, syllables, filters, dueum, patient_retry=True)
+        deadline = time.monotonic() + REQUEST_TIME_BUDGET
+        counts, warnings = fast_continuation_counts(dictionaries, syllables, filters, dueum, patient_retry=True, deadline=deadline)
         payload = {}
         for syllable in syllables:
             count, notes = counts.get(syllable, (0, ["확인하지 못했습니다."]))
