@@ -86,9 +86,9 @@ OPENDICT_API_KEY=우리말샘_키
 - `describe_words_without_counts()`: 두 단계 로딩 1단계에서 카드에 필요한 값(마지막 글자·사전 이름)만 채우고 수치는 `None`.
 - `rare_final_candidates()` / `prefix_expansion_candidates()`: 희귀 끝글자 역검색·접두 확장. 적중률이 높고 빠르다. 일반 검색 모드의 `sort=next`·`sort=one-shot`, `/api/warm` 예열, 한방단어 모드(`gather_one_shot_page()`)의 첫 후보원으로 쓰인다. 작업자 수는 `LOOKUP_WORKERS`.
 - `scan_dictionary_batch()`(2026-09-16 도입): 사전 원본을 `start_api_page`부터 `page_count`묶음만 병렬로 가져온다. 한방단어 모드가 후보가 모자랄 때 조금씩(기본 5묶음=500개) 이어서 훑는 데 쓴다. 손으로 정해둔 '희귀 받침 목록'에 없는 받침(예: 차풰)도 결국 잡아내지만 역검색보다 느리다.
-- `gather_one_shot_page()`(2026-09-16 도입, 사용자 요청): 한방단어 모드의 핵심. 한 번에 다 찾지 않고, 같은 검색(검색어·사전·필터·두음)의 진행 상황을 캐시에 저장해 두고 호출될 때마다 끝 글자를 `ONE_SHOT_PAGE_SYLLABLE_BATCH`개만 새로 확인해 새로 확정된 한방단어만 돌려준다. 후보가 모자라면 `scan_dictionary_batch()`로 조금 더 채운다. 자체 시간 제한은 `ONE_SHOT_PAGE_TIME_BUDGET`(10초)이며 `REQUEST_TIME_BUDGET`과 별개다.
+- `gather_one_shot_page()`(2026-09-16 도입, 사용자 요청): 한방단어 모드의 핵심. 한 번에 다 찾지 않고, 같은 검색(검색어·사전·필터·두음)의 진행 상황을 캐시에 저장해 두고 호출될 때마다 아직 안 본 끝 글자를 새로 확인해 새로 확정된 한방단어만 돌려준다. 확인 개수는 미리 자르지 않고 `ONE_SHOT_PAGE_TIME_BUDGET`(10초, `REQUEST_TIME_BUDGET`과 별개)이 허락하는 만큼 `fast_continuation_counts()`가 알아서 멈춘다(2026-09-17 수정: `sort=next`가 후보 전체를 시간 예산 안에서 확인해 훨씬 빨리 찾더라는 사용자 비교 신고로, 여기서만 `ONE_SHOT_PAGE_SYLLABLE_BATCH`개로 잘라 남은 시간을 못 쓰던 것을 없앰). 시간 부족으로 경고가 붙은 끝 글자는 `checked`에 기록하지 않아 다음 호출에서 다시 시도된다(그대로 기록하면 영영 재시도 안 돼 특정 한방단어가 사라져 보이는 버그가 있었다). `ONE_SHOT_PAGE_SYLLABLE_BATCH`는 이제 "후보가 모자라 `scan_dictionary_batch()`로 더 훑어야 하는 기준"으로만 쓰인다.
 - `paged_search()`: 필터를 통과한 화면 페이지 수집.
-- `continuation_count()`: 후속 단어 존재 확인. 한 항목만 조회하도록 축소하면 한 글자 필터 때문에 거짓 한방 판정이 재발한다. `dueum`이면 원음+정방향+역방향(`dueum_reverse_variants`)을 검사하고, 1페이지가 전부 걸리고 `total`이 크면 `start=2`를 한 번 더 본다. 사전 간 수는 `max`로 합친다(근사치).
+- `continuation_count()`: 후속 단어 존재 확인. 한 항목만 조회하도록 축소하면 한 글자 필터 때문에 거짓 한방 판정이 재발한다. `dueum`이면 원음+정방향+역방향(`dueum_reverse_variants`)을 검사하고, 1페이지가 전부 걸리고 `total`이 크면 `start=2`를 한 번 더 본다. 사전 간 수는 `max`로 합친다(근사치). 오류 없이 확정된 결과(0개든 그 이상이든)는 `syllable_count_cache`(`SYLLABLE_COUNT_TTL`=약 6개월)에 저장해 같은 끝 글자를 다시 물으면 바로 답한다(사용자 요청, 2026-09-17; 서버 재시작 시 지워짐).
 - `dedupe_display_words()`: 같은 표제어 병합 시 서로 다른 뜻을 `definitions`에 최대 3개 담는다.
 - `search()`: 페이지 후보의 고유 마지막 음절을 `LOOKUP_WORKERS`개 작업자로 병렬 분석. `defer_counts=1`이고 정렬이 개수와 무관하면 1단계 응답만 반환. `page` 파싱 실패는 1로, 예외는 `logger.exception` 후 한국어 JSON.
 

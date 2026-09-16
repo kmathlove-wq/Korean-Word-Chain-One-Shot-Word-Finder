@@ -62,6 +62,21 @@
     "느려서 그렇다"는 얼버무리지 말고 어느 단계(모으기 vs 판정)가 실제
     병목인지 정확히 짚어 설명할 것 — 이번엔 그 질문 덕분에 진짜 병목을
     찾았다.
+11. (2026-09-17) 사용자가 "이어갈 단어가 적은 순(sort=next)이 한방단어
+    모드보다 치미는아픔을 더 빨리 찾더라"고 실사용으로 비교 신고 → 원인은
+    `gather_one_shot_page()`가 매 호출 확인량을 `ONE_SHOT_PAGE_SYLLABLE_BATCH`
+    (12개)로 미리 잘라 놓아, `ONE_SHOT_PAGE_TIME_BUDGET`(10초)이 남아도
+    못 쓰고 있었던 것. `sort=next`(`analyse_words`)는 후보 전체를 넘기고
+    시간 예산(`fast_continuation_counts`의 `deadline`)이 알아서 멈추게
+    하는 방식이라 매 호출에 훨씬 많이 확인했다. 고침: `to_check`를 자르지
+    않고 큐 전체를 넘김. 같은 조사 중 두 번째 버그도 발견: 시간 부족으로
+    경고가 붙은 끝 글자를 `progress["checked"]`에 그대로 기록해, 다음
+    호출에서도 다시 시도되지 않고 영영 버려지고 있었다(치읓 한방단어가
+    검색을 여러 번 해도 안 나오다가 "조건에 맞는 단어를 찾지 못했습니다"로
+    끝나던 원인). 고침: 경고 없이 확정된 결과만 `checked`에 기록.
+    교훈: 같은 목적의 코드 경로 두 개(sort=next vs 한방단어 모드)가 있으면
+    사용자가 직접 비교해서 성능 차이를 알려줄 수 있다 — 그 신고를 "그럴 수도
+    있지" 하고 넘기지 말고 두 경로를 나란히 읽어 실제 차이를 찾아낼 것.
 
 - 끝 글자 병렬 조회는 `fast_continuation_counts()`로 통일(= `analyse_words` 빠른 경로 + `/api/continuations` 공유). `patient_retry`면 재시도를 `PATIENT_FAST_TIMEOUT(3,6)`로. `LOOKUP_WORKERS=6`, `rare_final_candidates`/`prefix_expansion_candidates`도 같은 작업자 수. 연결은 공유 `_http = requests.Session()`.
 - (2026-09-16) `시간이 부족` 경고가 뜨면 화면에 "다시 검색" 버튼(`#retry-button`)이 함께 나온다. `showMessage(text, kind, retry)`의 세 번째 인자로 제어하며, 눌리면 `search()`를 그대로 다시 부른다(같은 폼 값으로 재검색, 데워진 캐시를 탐). 한방단어 모드는 이제 "다음 결과 보기"가 기본 진행 수단이라 이 버튼은 주로 `sort=next`/`sort=one-shot`·`/api/continuations` 쪽 시간 부족에 쓰인다.

@@ -22,6 +22,7 @@ class HelperTests(unittest.TestCase):
     def setUp(self):
         # 테스트 간 캐시 오염(gather_one_shot_page 진행 상황, fetch_dictionary)을 막는다.
         app.cache._items.clear()
+        app.syllable_count_cache._items.clear()
 
     def test_dueum_and_last_syllable(self):
         self.assertEqual(app.get_dueum_variants("녀"), ["녀", "여"])
@@ -535,6 +536,54 @@ class HelperTests(unittest.TestCase):
             )
         self.assertFalse(has_more)
 
+    def test_gather_one_shot_page_checks_more_than_one_batch_of_syllables_per_call(self):
+        # 회귀 테스트(2026-09-17): '이어갈 단어가 적은 순'(next 정렬)은 후보
+        # 전체를 시간 예산 안에서 확인해 훨씬 빨리 한방단어를 찾는다고
+        # 사용자가 실사용으로 비교해 신고했다. 한방단어 모드는 예전엔
+        # ONE_SHOT_PAGE_SYLLABLE_BATCH(12)개로 잘라 놓아 남은 시간이 있어도
+        # 못 썼다. 이제는 큐 전체를 fast_continuation_counts에 넘겨 시간
+        # 예산이 허락하는 만큼 확인한다.
+        words = [
+            app.normalize_item({"word": f"단어{ending}", "sense": {"pos": "명사"}}, "stdict")
+            for ending in "가나다라마바사아자차카타파하호"  # 15개, 서로 다른 끝 글자
+        ]
+        self.assertGreater(len(words), app.ONE_SHOT_PAGE_SYLLABLE_BATCH)
+        with patch.object(app, "rare_final_candidates", return_value=(words, [])), \
+             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
+             patch.object(app, "scan_dictionary_batch", return_value=([], len(words), False, [])), \
+             patch.object(app, "continuation_count", return_value=(0, [])):
+            _new, confirmed, _has_more, _total, _warnings = app.gather_one_shot_page(
+                ["stdict"], "단", app.Filters(), False,
+            )
+        self.assertEqual(len(confirmed), len(words))
+
+    def test_gather_one_shot_page_retries_syllable_that_timed_out_instead_of_giving_up(self):
+        # 회귀 테스트(2026-09-17): 시간이 부족해 경고가 붙은 끝 글자를 '확인
+        # 완료'로 기록해 버리면 다음 호출에서도 다시 시도되지 않아 그
+        # 한방단어를 영영 찾지 못한다(사용자가 '치읓' 한방단어가 사라지는
+        # 것으로 발견).
+        lithium = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "rare_final_candidates", return_value=([lithium], [])), \
+             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
+             patch.object(app, "scan_dictionary_batch", return_value=([], 1, False, [])), \
+             patch.object(app, "continuation_count", return_value=(0, [app.REQUEST_TIME_BUDGET_WARNING])):
+            first_new, _first_confirmed, first_more, _t, first_warnings = app.gather_one_shot_page(
+                ["stdict"], "리", app.Filters(), True,
+            )
+        self.assertEqual(first_new, [])
+        self.assertIn(app.REQUEST_TIME_BUDGET_WARNING, first_warnings)
+        self.assertTrue(first_more)  # 아직 확인 못한 끝 글자가 남아 있으니 계속 시도할 수 있어야 한다.
+
+        with patch.object(app, "rare_final_candidates", return_value=([lithium], [])), \
+             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
+             patch.object(app, "scan_dictionary_batch", return_value=([], 1, False, [])), \
+             patch.object(app, "continuation_count", return_value=(0, [])):
+            second_new, _second_confirmed, second_more, _t2, _w2 = app.gather_one_shot_page(
+                ["stdict"], "리", app.Filters(), True,
+            )
+        self.assertEqual([w["word"] for w in second_new], ["리튬"])
+        self.assertFalse(second_more)
+
     def test_one_shot_route_page_one_shows_all_confirmed_so_far(self):
         lithium = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
         lithium["is_one_shot"] = True
@@ -688,6 +737,43 @@ class HelperTests(unittest.TestCase):
             count, warnings = app.continuation_count(["stdict", "opendict"], "가", app.Filters(), False)
         self.assertEqual(warnings, [])
         self.assertEqual(count, 120)
+
+    # --- 조각 D 회귀 테스트: 끝 글자별 이어갈 단어 수 오래 기억하기(사용자 요청, 2026-09-17) ---
+    def test_continuation_count_remembers_confirmed_dead_end(self):
+        with patch.object(app, "fetch_dictionary", return_value=([], 0)) as fetch:
+            first_count, first_warnings = app.continuation_count(["stdict"], "튬", app.Filters(), False)
+            second_count, second_warnings = app.continuation_count(["stdict"], "튬", app.Filters(), False)
+        self.assertEqual((first_count, first_warnings), (0, []))
+        self.assertEqual((second_count, second_warnings), (0, []))
+        # 두 번째 호출은 기억해 둔 값을 바로 돌려줘 fetch_dictionary를 다시 부르지 않는다.
+        fetch.assert_called_once()
+
+    def test_continuation_count_also_remembers_nonzero_result(self):
+        # '이어갈 단어가 적은 순' 정렬도 이 값을 그대로 쓰므로, 0개뿐 아니라
+        # 실제 개수도 오래 기억해 둔다(사용자 요청, 2026-09-17).
+        found = app.normalize_item({"word": "가나", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "fetch_dictionary", return_value=([found], 4467)) as fetch:
+            first_count, first_warnings = app.continuation_count(["stdict"], "가", app.Filters(), False)
+            second_count, second_warnings = app.continuation_count(["stdict"], "가", app.Filters(), False)
+        self.assertEqual((first_count, first_warnings), (4467, []))
+        self.assertEqual((second_count, second_warnings), (4467, []))
+        fetch.assert_called_once()
+
+    def test_continuation_count_does_not_remember_when_warnings_present(self):
+        with patch.object(app, "fetch_dictionary", side_effect=app.ApiError("지연")):
+            app.continuation_count(["stdict"], "튬", app.Filters(), False)
+        with patch.object(app, "fetch_dictionary", return_value=([], 0)) as fetch:
+            app.continuation_count(["stdict"], "튬", app.Filters(), False)
+        # 경고가 있었던 결과는 기억하지 않으므로 두 번째 호출도 다시 확인한다.
+        fetch.assert_called_once()
+
+    def test_continuation_count_dead_end_is_scoped_to_filters_and_dueum(self):
+        with patch.object(app, "fetch_dictionary", return_value=([], 0)):
+            app.continuation_count(["stdict"], "튬", app.Filters(noun_only=True), False)
+        with patch.object(app, "fetch_dictionary", return_value=([], 0)) as fetch:
+            # 필터가 다르면(noun_only=False) 결과가 달라질 수 있어 다시 확인해야 한다.
+            app.continuation_count(["stdict"], "튬", app.Filters(noun_only=False), False)
+        fetch.assert_called_once()
 
     def test_dueum_reverse_variants_inverts_forward_rules(self):
         self.assertEqual(sorted(app.dueum_reverse_variants("여")), sorted(["려", "녀"]))

@@ -84,7 +84,7 @@ OPENDICT_API_KEY=우리말샘_키
 ## 한방단어 판정
 
 - `last_hangul_syllable()`은 공백, 숫자, 괄호, 하이픈, 특수문자를 무시하고 마지막 `[가-힣]` 음절을 찾는다.
-- `continuation_count()`는 마지막 음절로 시작하는 단어를 선택 사전에서 다시 검색한다.
+- `continuation_count()`는 마지막 음절로 시작하는 단어를 선택 사전에서 다시 검색한다. 오류 없이 확정된 결과(0개든 그 이상이든)는 `syllable_count_cache`(`SYLLABLE_COUNT_TTL`=약 6개월)에 저장해 같은 끝 글자를 다시 물으면 바로 답한다(사용자 요청, 2026-09-17; 서버 재시작 시 지워짐).
 - 첫 항목이 한 글자 제외 등의 필터에 걸리는 오판을 방지하기 위해 후속 검색은 최대 100개 묶음을 확인한다.
 - 필터를 통과한 후속 단어가 하나라도 있으면 한방단어가 아니다.
 - `dueum=true`이면 `continuation_count()`는 원음 + 정방향 변환음(`dueum_variant`) + 역방향 원래 소리(`dueum_reverse_variants`, 예: 여→려·녀)를 모두 검사한다. 어느 하나라도 단어가 있으면 한방단어가 아니다. (단어 목록 경로 `paged_search_with_dueum`은 바꾸지 않는다.)

@@ -150,6 +150,17 @@ class TTLCache:
 
 cache = TTLCache()
 
+# 한 번 확인한 '이 끝 글자로 시작하는 단어가 몇 개인지'(0개=막다른 골목
+# 포함)를 오래 기억해 둔다(사용자 요청, 2026-09-17). 한방단어 판정뿐 아니라
+# '이어갈 단어가 적은 순' 정렬도 이 값을 그대로 쓴다. 다음에 다른 검색이
+# 같은 끝 글자를 물어보면 국립국어원에 다시 묻지 않고 바로 답한다 — 쓸수록
+# 빨라진다. 6개월(대략) 지나면 잊혀져 다시 확인한다(그 사이 사전에 새 단어가
+# 생겨 개수가 달라졌을 수 있으니). 서버 메모리에만 있어 서버가 다시
+# 시작되면(배포·재시작) 지워진다 — 완전히 영구 보존하려면 별도 저장소
+# (데이터베이스)가 필요하다.
+SYLLABLE_COUNT_TTL = 60 * 60 * 24 * 180
+syllable_count_cache = TTLCache(ttl=SYLLABLE_COUNT_TTL)
+
 # 국립국어원 서버에 매번 새로 접속(TLS 악수)하지 않고 연결을 재사용한다.
 _http = requests.Session()
 _http_adapter = requests.adapters.HTTPAdapter(pool_connections=4, pool_maxsize=32, max_retries=0)
@@ -606,6 +617,12 @@ def prefix_expansion_candidates(
 
 
 def continuation_count(dictionaries: list[str], syllable: str, filters: Filters, dueum: bool, exact: bool = True, slow: bool = False) -> tuple[int, list[str]]:
+    count_cache_key = (tuple(dictionaries), syllable, filters.key(), dueum)
+    remembered = syllable_count_cache.get(count_cache_key)
+    if remembered is not None:
+        # 예전에 이 끝 글자로 시작하는 단어 수를 확정해 둔 적이 있으면(0개=
+        # 막다른 골목 포함) 다시 묻지 않고 바로 돌려준다(사용자 요청, 2026-09-17).
+        return remembered
     if dueum:
         # 두음법칙 허용 시: 원음 + 정방향 변환음 + 역방향(원래 소리)까지 모두 확인한다.
         variants = list(dict.fromkeys(
@@ -649,7 +666,10 @@ def continuation_count(dictionaries: list[str], syllable: str, filters: Filters,
                     variant_has_word = True
                     if not exact:
                         # 빠른 경로: 이어갈 단어가 하나라도 확인되면 즉시 종료한다.
-                        return total_count + total, list(dict.fromkeys(warnings))
+                        fast_result = (total_count + total, list(dict.fromkeys(warnings)))
+                        if not fast_result[1]:
+                            syllable_count_cache.set(count_cache_key, fast_result)
+                        return fast_result
                     # 근사치: 같은 음절을 두 사전에서 더하면 겹치는 단어가 이중 계산된다
                     # (우리말샘이 표준국어대사전을 대부분 포함). 정확한 단어 목록이 없어
                     # 사전 간에는 max로만 합친다. 서로 다른 두음 변형(연 vs 련)은
@@ -659,7 +679,11 @@ def continuation_count(dictionaries: list[str], syllable: str, filters: Filters,
                 warnings.append(str(exc))
         if exact and variant_has_word:
             total_count += variant_total
-    return total_count, list(dict.fromkeys(warnings))
+    result_warnings = list(dict.fromkeys(warnings))
+    if not result_warnings:
+        # 오류 없이 끝까지 확인됐을 때만(0개든 그 이상이든) 오래 기억해 둔다.
+        syllable_count_cache.set(count_cache_key, (total_count, result_warnings))
+    return total_count, result_warnings
 
 
 def fast_continuation_counts(
@@ -976,10 +1000,20 @@ def gather_one_shot_page(
         progress["syllables"] = list(dict.fromkeys(last_hangul_syllable(w["word"]) for w in ordered))
         unchecked = [s for s in progress["syllables"] if s not in progress["checked"]]
 
-    to_check = unchecked[:ONE_SHOT_PAGE_SYLLABLE_BATCH]
+    # 확인할 개수를 미리 자르지 않는다 — '이어갈 단어가 적은 순'(next 정렬)이
+    # 후보 전체를 시간 예산 안에서 확인해 훨씬 빨리 한방단어를 찾아낸다는
+    # 사용자 신고(2026-09-17)로 비교해 보니, 여기서만 12개로 잘라 놓아서
+    # 남은 시간이 있어도 못 쓰고 있었다. `fast_continuation_counts`가
+    # `deadline`으로 이미 알아서 멈추므로, 큐 전체를 넘겨 시간이 허락하는
+    # 만큼 최대한 확인한다(sort=next의 analyse_words와 같은 방식).
+    to_check = unchecked
     if to_check:
         counts, count_warnings = fast_continuation_counts(dictionaries, to_check, filters, dueum, deadline=deadline)
-        progress["checked"].update(counts)
+        # 시간이 부족해 경고가 붙은 항목은 '확인 완료'로 기록하지 않는다.
+        # 그대로 기록하면 실제로는 못 물어본 끝 글자가 checked에 남아 다음
+        # 호출에서도 다시 시도되지 않고 영영 버려진다(2026-09-17 발견).
+        resolved = {syllable: value for syllable, value in counts.items() if not value[1]}
+        progress["checked"].update(resolved)
         progress["warnings"].extend(count_warnings)
 
     new_this_round = []
