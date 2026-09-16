@@ -397,6 +397,20 @@ class HelperTests(unittest.TestCase):
         self.assertIn("deadline", rare.call_args.kwargs)
         self.assertIsInstance(rare.call_args.kwargs["deadline"], float)
 
+    def test_search_route_gives_collection_a_smaller_deadline_than_analysis(self):
+        # 회귀 테스트(2026-09-16): 후보 수집(rare_final_candidates)이 판정
+        # (analyse_words)과 같은 마감을 쓰면, 후보가 많은 흔한 글자가 수집
+        # 단계에서만 예산을 다 써 판정을 한 번도 못 해보는 문제가 있었다.
+        # 수집에는 짧은 마감을, 판정에는 전체 예산을 줘야 한다.
+        candidates = [app.normalize_item({"word": f"리가{i}", "sense": {"pos": "명사"}}, "stdict") for i in range(5)]
+        with patch.object(app, "paged_search", return_value=(candidates, 495, [])), \
+             patch.object(app, "rare_final_candidates", return_value=([], [])) as rare, \
+             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
+             patch.object(app, "analyse_words", return_value=([], [])) as analyse:
+            response = app.app.test_client().get("/api/search?query=리&dictionary=stdict&mode=all&sort=next&page=1")
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(rare.call_args.kwargs["deadline"], analyse.call_args.kwargs["deadline"])
+
     def test_fast_analysis_changes_ryum_to_yum(self):
         candidate = app.normalize_item({"word": "리놀륨", "sense": {"pos": "명사"}}, "opendict")
         follow = app.normalize_item({"word": "윰라대왕", "sense": {"pos": "명사"}}, "opendict")
@@ -514,6 +528,26 @@ class HelperTests(unittest.TestCase):
             )
         self.assertEqual(total, 500)
         self.assertEqual(len(words), 100)  # 첫 묶음만, 나머지는 시간 부족으로 건너뜀
+        self.assertIn(app.REQUEST_TIME_BUDGET_WARNING, warnings)
+
+    def test_collect_matching_words_stops_mid_flight_past_deadline(self):
+        # 회귀 테스트(2026-09-16): 마감 시각을 시작 '전'에만 확인하고 묶음을
+        # 이미 던진 뒤에는 끝까지 기다리는 버그가 있었다(실 서비스에서 동시
+        # 조회 수를 줄였더니 '리'처럼 묶음이 많은 글자가 20초 넘게 응답이
+        # 아예 없는 걸로 확인). 이제는 진행 중에도 마감을 넘기면 멈춘다.
+        def fake_fetch(_dictionary, _query, start, _count, _filters, method="start", **_kwargs):
+            if start == 1:
+                return [], 900
+            time.sleep(0.1)
+            return [app.normalize_item({"word": f"단어{start}", "sense": {"pos": "명사"}}, "stdict")], 900
+
+        with patch.object(app, "fetch_dictionary", side_effect=fake_fetch), \
+             patch.object(app, "LOOKUP_WORKERS", 1):
+            words, total, warnings = app.collect_matching_words(
+                ["stdict"], "단", app.Filters(), deadline=time.monotonic() + 0.05,
+            )
+        self.assertEqual(total, 900)
+        self.assertLess(len(words), 9)  # 9묶음 다 못 끝내고 마감에 걸려 멈춘다
         self.assertIn(app.REQUEST_TIME_BUDGET_WARNING, warnings)
 
     def test_fast_continuation_counts_marks_unstarted_lookups_as_time_short(self):

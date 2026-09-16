@@ -55,6 +55,12 @@ ONE_SHOT_SCAN_MAX_BATCHES = -(-ONE_SHOT_SCAN_CAP // API_PAGE_SIZE)
 # 더 빨라짐)에 맡긴다.
 REQUEST_TIME_BUDGET = 15.0
 REQUEST_TIME_BUDGET_WARNING = "시간이 부족해 일부 후보를 확인하지 못했습니다. 같은 글자로 다시 검색하면 이어서 더 찾아냅니다."
+# 후보를 '모으는' 단계(collect_matching_words 등)에 예산을 다 뺏기면, 정작
+# 한방단어를 가려내는 '판정' 단계(analyse_words)에 쓸 시간이 하나도 안 남는다
+# (2026-09-16, 실 서비스에서 흔한 글자가 수집 단계에서만 예산을 다 쓰고
+# 판정을 한 번도 못 해 0개가 나오는 걸 확인). 수집에는 예산의 앞부분만
+# 떼어 주고, 나머지는 항상 판정에 남긴다.
+COLLECTION_TIME_FRACTION = 0.4
 FAST_CONTINUATION_PAGE_SIZE = API_PAGE_SIZE
 FAST_REQUEST_TIMEOUT = (2, 3)
 # 빠른 경로 재시도용. 공식 API가 지연될 때 첫 조회(3초)에서 놓친 끝 글자를
@@ -894,13 +900,18 @@ def collect_matching_words(
             except ApiError as exc:
                 return ([], []) if "Invalid start value" in str(exc) else ([], [str(exc)])
 
-        with ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(starts))) as executor:
-            futures = [executor.submit(probe, start) for start in starts]
-            for future in as_completed(futures):
-                words, notes = future.result()
-                warnings.extend(notes)
-                for word in words:
-                    merge_word(merged, word)
+        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+        executor = ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(starts)))
+        futures = {executor.submit(probe, start): start for start in starts}
+        done, not_done = wait(futures, timeout=remaining)
+        for future in done:
+            words, notes = future.result()
+            warnings.extend(notes)
+            for word in words:
+                merge_word(merged, word)
+        if not_done:
+            warnings.append(REQUEST_TIME_BUDGET_WARNING)
+        executor.shutdown(wait=False, cancel_futures=True)
     return list(merged.values()), raw_total, list(dict.fromkeys(warnings))
 
 
@@ -931,19 +942,23 @@ def gather_one_shot_words(dictionaries: list[str], query: str, filters: Filters,
     총계, 경고)로 돌려준다. 페이지와 무관한 값이므로 (검색어, 사전들, 필터,
     두음)으로 캐시하고, 라우트는 이 목록을 페이지 크기로 잘라서 보여 준다.
 
-    전체 과정은 `REQUEST_TIME_BUDGET`(8초) 안에서만 진행한다 — 사용자 요청으로
-    10초 이내 응답을 목표로 정했다(2026-09-15). 시간이 부족해 일부만
-    확인했으면 그 결과는 캐시하지 않는다 — 다음 검색이 그새 데워진 캐시
-    (사전 API 응답 캐시는 검색어와 무관하게 공유됨)를 타고 더 많이 확인할
-    수 있도록 남겨 둔다.
+    전체 과정은 `REQUEST_TIME_BUDGET`(15초) 안에서만 진행한다. 후보 수집에는
+    그중 앞 `COLLECTION_TIME_FRACTION`(40%)만 주고, 나머지는 항상 판정에
+    남긴다 — 안 그러면 후보가 아주 많은 흔한 글자가 수집 단계에서만 예산을
+    다 써 버려 판정을 한 번도 못 해보고 0개로 끝난다(2026-09-16, 실 서비스에서
+    확인). 시간이 부족해 일부만 확인했으면 그 결과는 캐시하지 않는다 —
+    다음 검색이 그새 데워진 캐시(사전 API 응답 캐시는 검색어와 무관하게
+    공유됨)를 타고 더 많이 확인할 수 있도록 남겨 둔다.
     """
     cache_key = ("one_shot_full", query, tuple(dictionaries), filters.key(), dueum)
     cached = cache.get(cache_key)
     if cached is not None:
         return copy.deepcopy(cached)
 
-    deadline = time.monotonic() + REQUEST_TIME_BUDGET
-    candidates, starting_total, warnings = gather_one_shot_candidates(dictionaries, query, filters, dueum, deadline=deadline)
+    request_start = time.monotonic()
+    deadline = request_start + REQUEST_TIME_BUDGET
+    collection_deadline = request_start + REQUEST_TIME_BUDGET * COLLECTION_TIME_FRACTION
+    candidates, starting_total, warnings = gather_one_shot_candidates(dictionaries, query, filters, dueum, deadline=collection_deadline)
     analysed, notes = analyse_words(
         dictionaries, candidates, filters, dueum, exact_counts=False, fast_all_counts=True, deadline=deadline,
     )
@@ -1055,10 +1070,15 @@ def search():
         # 목록(캐시됨)을 모아 페이지 크기로 잘라서 보여 준다.
         defer_counts = as_bool("defer_counts", False) and mode != "one-shot" and sort not in {"one-shot", "next"}
         deferred = False
-        # 요청 하나에 걸리는 시간이 REQUEST_TIME_BUDGET(8초)을 넘지 않도록,
-        # 이 요청에서 하는 모든 넓은 탐색·다중 판정이 같은 마감 시각을 쓴다
-        # (2026-09-15, 사용자 요청으로 기기·필터와 무관하게 10초 이내 응답 목표).
-        deadline = time.monotonic() + REQUEST_TIME_BUDGET
+        # 요청 하나에 걸리는 시간이 REQUEST_TIME_BUDGET을 넘지 않도록, 이
+        # 요청에서 하는 모든 넓은 탐색·다중 판정이 같은 마감 시각을 쓴다
+        # (2026-09-15, 기기·필터와 무관하게 적용). 후보를 '모으는' 단계
+        # (rare_final_candidates 등)에는 예산 앞부분만 주고, 나머지는 항상
+        # '판정'(analyse_words)에 남긴다 — 안 그러면 흔한 글자가 수집에서만
+        # 예산을 다 써 판정을 한 번도 못 해본다(2026-09-16, 실 서비스 확인).
+        request_start = time.monotonic()
+        deadline = request_start + REQUEST_TIME_BUDGET
+        collection_deadline = request_start + REQUEST_TIME_BUDGET * COLLECTION_TIME_FRACTION
         if mode == "one-shot":
             full_list, raw_total, warnings = gather_one_shot_words(dictionaries, query, filters, dueum)
             analysed = full_list
@@ -1076,13 +1096,13 @@ def search():
                     query,
                     filters,
                     deep=(sort != "one-shot"),
-                    deadline=deadline,
+                    deadline=collection_deadline,
                 )
                 warnings.extend(rare_warnings)
                 for word in rare_candidates:
                     if not any(existing["word"] == word["word"] for existing in candidates):
                         candidates.append(word)
-                expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters, deadline=deadline)
+                expanded_candidates, expanded_warnings = prefix_expansion_candidates(dictionaries, query, candidates, filters, deadline=collection_deadline)
                 warnings.extend(expanded_warnings)
                 for word in expanded_candidates:
                     if not any(existing["word"] == word["word"] for existing in candidates):

@@ -127,10 +127,10 @@ OPENDICT_API_KEY=우리말샘_키
 - 화면에는 24개 단위로 제공한다.
 - 첫 요청에서 전체 후보를 무제한 수집하거나 모든 뜻을 순차 조회하지 않는다.
 - 마지막 음절별 조회는 캐시하고 독립 요청은 제한된 작업자 수로 병렬화한다.
-- 공식 API 동시 요청 상한은 `LOOKUP_WORKERS`(24)이며, 연결은 공유 `Session`으로 재사용한다.
+- 공식 API 동시 요청 상한은 `LOOKUP_WORKERS`(6, 2026-09-16 24→6: 실 서비스 진단 결과 동시 요청이 많을수록 낱개 응답이 오히려 훨씬 느려짐)이며, 연결은 공유 `Session`으로 재사용한다.
 - 목록은 두 단계로 나눠 보낸다(1단계 목록/후보, 2단계 `/api/continuations`). `words`/`all` 모드에만 해당한다. 개수가 정렬에 필요한 경로(`next`·`one-shot` 정렬)와 `mode=one-shot`(한방단어 모드, 후보 자체를 넓게 모으므로 절반짜리 1단계가 의미 없음)은 한 번에 계산한다.
 - 한방단어 후보 수집은 사전 한 곳당 `ONE_SHOT_SCAN_CAP`(3000)개까지만 실제로 살펴보고, `collect_matching_words()`는 항상 `FAST_REQUEST_TIMEOUT`·1회 시도만 쓴다(기본 제한 시간을 쓰면 묶음 하나만 느려도 운영 서버 제한 시간을 넘겨 502가 난다, 2026-09-15 실 서비스에서 확인).
-- `/api/search`(모든 모드·정렬)와 `/api/continuations`는 요청마다 `REQUEST_TIME_BUDGET`(15초, 2026-09-15 8초로 줄였다가 찾는 한방단어가 너무 적어져 사용자와 상의해 다시 늘림) 하나를 공유하는 마감 시각을 계산해 `rare_final_candidates`·`prefix_expansion_candidates`·`analyse_words`·`fast_continuation_counts`·`collect_matching_words`에 전달한다. 넘기면 그때까지 확인한 결과만 반환하고(`REQUEST_TIME_BUDGET_WARNING`) 한방단어 목록은 캐시하지 않는다 — 다음 검색이 데워진 캐시로 더 찾는다. `analyse_words`는 끝 글자 조회를 집합이 아니라 candidates 순서(정렬돼 있으면 희귀 받침 후보 먼저)를 보존한 목록으로 넣어, 시간이 부족해도 가능성 큰 후보부터 확인한다.
+- `/api/search`(모든 모드·정렬)와 `/api/continuations`는 요청마다 `REQUEST_TIME_BUDGET`(15초) 하나를 공유하는 마감 시각을 계산해 넘긴다. 수집(`collect_matching_words`·`rare_final_candidates`·`prefix_expansion_candidates`)에는 그 예산의 앞 `COLLECTION_TIME_FRACTION`(40%)만 주는 더 짧은 마감을 따로 계산해 넘기고, 판정(`analyse_words`·`fast_continuation_counts`)에는 전체 마감을 그대로 넘긴다 — 안 그러면 후보 많은 흔한 글자가 수집에서만 예산을 다 써 판정을 한 번도 못 해본다(2026-09-16 실 서비스 확인). `collect_matching_words`의 묶음 조회 루프도 시작 전뿐 아니라 진행 중에도 마감을 확인하도록 고쳤다(이전엔 시작 전 확인만 있어, 묶음이 많은데 동시 조회 수가 적으면 마감을 한참 넘겨서까지 기다렸다). 시간이 부족했으면(`REQUEST_TIME_BUDGET_WARNING`) 한방단어 목록을 캐시하지 않아 다음 검색이 데워진 캐시로 더 찾는다. `analyse_words`는 끝 글자 조회를 집합이 아니라 candidates 순서(정렬돼 있으면 희귀 받침 후보 먼저)를 보존한 목록으로 넣어, 시간이 부족해도 가능성 큰 후보부터 확인한다.
 - 제한 시간과 재시도를 없애지 않는다. 현재 연결 10초, 응답 20초, 총 2회 시도(빠른 경로는 연결 2초·응답 3초·1회)다.
 - 성능 변경 후 흔한 글자 `기`와 드문 글자 `슘` 양쪽의 응답 시간과 판정을 확인한다.
 
