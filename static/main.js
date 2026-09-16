@@ -1,6 +1,8 @@
 const form = document.querySelector('#search-form');
 const queryInput = document.querySelector('#query');
 const message = document.querySelector('#message');
+const messageText = document.querySelector('#message-text');
+const retryButton = document.querySelector('#retry-button');
 const loading = document.querySelector('#loading');
 const results = document.querySelector('#results');
 const grid = document.querySelector('#word-grid');
@@ -24,9 +26,12 @@ function uniqueWords(words) {
   return [...unique.values()];
 }
 
-function showMessage(text, kind = 'error') {
-  message.textContent = text;
+// retry: 서버가 시간이 부족해 일부만 확인했다고 안내할 때 "다시 검색" 버튼을
+// 함께 보여준다. 눌리면 같은 조건으로 검색을 새로 보낸다(캐시가 데워져 더 잘 찾음).
+function showMessage(text, kind = 'error', retry = false) {
+  messageText.textContent = text;
   message.style.borderColor = kind === 'notice' ? '#176b45' : '#a83b37';
+  setHidden(retryButton, !retry);
   setHidden(message, false);
 }
 
@@ -229,14 +234,15 @@ async function search(page = 1, append = false) {
     if (data.deferred) fillDeferredCounts(mySeq, key);
     if (append && !scrollToNewResults()) requestAnimationFrame(() => moreButton.scrollIntoView({behavior: 'smooth', block: 'center'}));
     const warningText = data.warnings?.length ? `일부 결과 안내: ${data.warnings.join(' ')}` : '';
+    const timeShort = data.warnings?.some(w => w.includes('시간이 부족')) || false;
     if (!data.words.length) {
       let emptyText;
       if (params.get('mode') === 'one-shot' && data.has_more) emptyText = '이번 페이지에서는 한방단어를 찾지 못했습니다. 아래의 다음 결과 보기를 눌러 보세요.';
       else if (params.get('mode') === 'one-shot') emptyText = '확인된 한방단어가 없습니다. 오류가 아니라, 선택한 사전과 필터 기준에서 끝까지 확인했지만 한방단어를 찾지 못한 상태입니다.';
       else emptyText = '조건에 맞는 단어를 찾지 못했습니다. 필터를 바꿔 보세요.';
-      showMessage(warningText ? `${warningText}\n${emptyText}` : emptyText, 'notice');
+      showMessage(warningText ? `${warningText}\n${emptyText}` : emptyText, 'notice', timeShort);
     } else if (warningText) {
-      showMessage(warningText, 'notice');
+      showMessage(warningText, 'notice', timeShort);
     }
     prefetchNextPage();
   } catch (error) { showMessage(error.message); }
@@ -246,6 +252,7 @@ async function search(page = 1, append = false) {
 form.addEventListener('submit', event => { event.preventDefault(); search(); });
 form.addEventListener('reset', () => setTimeout(() => { queryInput.value = ''; state = {page:1, words:[], hasMore:false, params:null, recentKeys:new Set(), prefetch:null}; setHidden(results,true); setHidden(message,true); }, 0));
 document.querySelector('#clear-query').addEventListener('click', () => { queryInput.value = ''; queryInput.focus(); });
+retryButton.addEventListener('click', () => search());
 moreButton.addEventListener('click', () => search(state.page + 1, true));
 moreTopButton.addEventListener('click', () => search(state.page + 1, true));
 sortSelect.addEventListener('change', () => { if (state.words.length) search(); });
