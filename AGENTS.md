@@ -60,9 +60,9 @@ OPENDICT_API_KEY=우리말샘_키
 
 `dictionary`은 `stdict`, `opendict`, `mode`는 `all`, `words`, `one-shot`을 허용한다. 검색 필터는 `Filters` 데이터 클래스와 쿼리 매개변수 이름을 일치시킨다.
 
-`/api/search`에 `defer_counts=1`을 주면 목록을 이어갈 단어 수 없이(`next_word_count=null`, `deferred=true`) 먼저 돌려준다. `sort`가 `next`·`one-shot`이면 무시된다.
+`/api/search`에 `defer_counts=1`을 주면 목록을 이어갈 단어 수 없이(`next_word_count=null`, `deferred=true`) 먼저 돌려준다. `sort`가 `next`·`one-shot`이거나 `mode=one-shot`이면 무시된다.
 - `words`/`all` 모드: 단어 목록만 먼저, 화면이 `/api/continuations`로 숫자·한방 표시를 채운다.
-- `one-shot` 모드: `defer_counts`를 무시한다(2026-09-15 변경). 후보 수집 자체가 이제 실제 단어를 넓게 모으는 방식이라 '희귀 끝글자만 먼저' 판정하는 절반짜리 1단계가 의미 없다. 항상 `gather_one_shot_words()`로 완전히 판정된 목록을 모아(캐시) 페이지로 잘라 돌려준다(`deferred`는 항상 `false`).
+- `one-shot` 모드(2026-09-16 재설계): '한 번에 다 찾기'가 아니라 '조금씩 이어서 찾기'다. `gather_one_shot_page()`가 요청마다 새로 확정된 한방단어를 조금만 찾아 돌려준다. `page=1`은 지금까지 확정된 한방단어 전체를, `page>1`("다음 결과 보기")은 이번에 새로 확정된 것만 돌려준다(화면이 이어 붙임). `deferred`는 항상 `false`다.
 
 ## 실행과 진단
 
@@ -84,11 +84,11 @@ OPENDICT_API_KEY=우리말샘_키
 - `fetch_dictionary()`: 인증, 재시도, 제한 시간, JSON/XML 파싱, 필터 적용.
 - `fast_continuation_counts()`: 여러 끝 글자를 `LOOKUP_WORKERS`개 작업자로 병렬 조회하고 실패분을 1회 재시도(`patient_retry`면 긴 제한 시간). `analyse_words()` 빠른 경로와 `/api/continuations`가 공유한다.
 - `describe_words_without_counts()`: 두 단계 로딩 1단계에서 카드에 필요한 값(마지막 글자·사전 이름)만 채우고 수치는 `None`.
-- `collect_matching_words()`: 검색어로 시작하는 단어를 사전 한 곳에서 최대 `ONE_SHOT_SCAN_CAP`(3000)개까지 실제로 병렬 수집한다(2026-09-15 도입). 손으로 정해둔 '희귀 받침 목록'을 추측하지 않으므로 그 목록에 없는 받침으로 끝나는 한방단어(예: 차풰)도 놓치지 않지만, `rare_final_candidates`보다 느리다. `gather_one_shot_candidates()`는 두 방법을 함께 쓴다: `rare_final_candidates`/`prefix_expansion_candidates`(역검색, 적중률 높고 빠름)를 먼저 부르고, 두음 변형까지 합쳐 이 함수를 보조로 더한다(2026-09-16, 실 서비스 진단: 이 함수만 쓰면 시간 예산 안에 희귀 받침 후보를 거의 못 만남).
-- `rare_final_candidates()` / `prefix_expansion_candidates()`: 희귀 끝글자 역검색·접두 확장. 일반 검색 모드의 `sort=next`·`sort=one-shot`과 `/api/warm` 예열뿐 아니라 한방단어 모드(`gather_one_shot_candidates()`)도 2026-09-16부터 다시 쓴다(빠르고 적중률 높은 1차 후보원). 작업자 수는 `LOOKUP_WORKERS`.
+- `rare_final_candidates()` / `prefix_expansion_candidates()`: 희귀 끝글자 역검색·접두 확장. 적중률이 높고 빠르다. 일반 검색 모드의 `sort=next`·`sort=one-shot`, `/api/warm` 예열, 한방단어 모드(`gather_one_shot_page()`)의 첫 후보원으로 쓰인다. 작업자 수는 `LOOKUP_WORKERS`.
+- `scan_dictionary_batch()`(2026-09-16 도입): 사전 원본을 `start_api_page`부터 `page_count`묶음만 병렬로 가져온다. 한방단어 모드가 후보가 모자랄 때 조금씩(기본 5묶음=500개) 이어서 훑는 데 쓴다. 손으로 정해둔 '희귀 받침 목록'에 없는 받침(예: 차풰)도 결국 잡아내지만 역검색보다 느리다.
+- `gather_one_shot_page()`(2026-09-16 도입, 사용자 요청): 한방단어 모드의 핵심. 한 번에 다 찾지 않고, 같은 검색(검색어·사전·필터·두음)의 진행 상황을 캐시에 저장해 두고 호출될 때마다 끝 글자를 `ONE_SHOT_PAGE_SYLLABLE_BATCH`개만 새로 확인해 새로 확정된 한방단어만 돌려준다. 후보가 모자라면 `scan_dictionary_batch()`로 조금 더 채운다. 자체 시간 제한은 `ONE_SHOT_PAGE_TIME_BUDGET`(10초)이며 `REQUEST_TIME_BUDGET`과 별개다.
 - `paged_search()`: 필터를 통과한 화면 페이지 수집.
 - `continuation_count()`: 후속 단어 존재 확인. 한 항목만 조회하도록 축소하면 한 글자 필터 때문에 거짓 한방 판정이 재발한다. `dueum`이면 원음+정방향+역방향(`dueum_reverse_variants`)을 검사하고, 1페이지가 전부 걸리고 `total`이 크면 `start=2`를 한 번 더 본다. 사전 간 수는 `max`로 합친다(근사치).
-- `gather_one_shot_words()`: 한방단어 모드 전체 목록 1회 수집 + 캐시. 라우트는 이 목록을 페이지로 자른다.
 - `dedupe_display_words()`: 같은 표제어 병합 시 서로 다른 뜻을 `definitions`에 최대 3개 담는다.
 - `search()`: 페이지 후보의 고유 마지막 음절을 `LOOKUP_WORKERS`개 작업자로 병렬 분석. `defer_counts=1`이고 정렬이 개수와 무관하면 1단계 응답만 반환. `page` 파싱 실패는 1로, 예외는 `logger.exception` 후 한국어 JSON.
 
@@ -128,9 +128,9 @@ OPENDICT_API_KEY=우리말샘_키
 - 첫 요청에서 전체 후보를 무제한 수집하거나 모든 뜻을 순차 조회하지 않는다.
 - 마지막 음절별 조회는 캐시하고 독립 요청은 제한된 작업자 수로 병렬화한다.
 - 공식 API 동시 요청 상한은 `LOOKUP_WORKERS`(6, 2026-09-16 24→6: 실 서비스 진단 결과 동시 요청이 많을수록 낱개 응답이 오히려 훨씬 느려짐)이며, 연결은 공유 `Session`으로 재사용한다.
-- 목록은 두 단계로 나눠 보낸다(1단계 목록/후보, 2단계 `/api/continuations`). `words`/`all` 모드에만 해당한다. 개수가 정렬에 필요한 경로(`next`·`one-shot` 정렬)와 `mode=one-shot`(한방단어 모드, 후보 자체를 넓게 모으므로 절반짜리 1단계가 의미 없음)은 한 번에 계산한다.
-- 한방단어 후보 수집은 사전 한 곳당 `ONE_SHOT_SCAN_CAP`(3000)개까지만 실제로 살펴보고, `collect_matching_words()`는 항상 `FAST_REQUEST_TIMEOUT`·1회 시도만 쓴다(기본 제한 시간을 쓰면 묶음 하나만 느려도 운영 서버 제한 시간을 넘겨 502가 난다, 2026-09-15 실 서비스에서 확인).
-- `/api/search`(모든 모드·정렬)와 `/api/continuations`는 요청마다 `REQUEST_TIME_BUDGET`(15초) 하나를 공유하는 마감 시각을 계산해 넘긴다. 수집(`collect_matching_words`·`rare_final_candidates`·`prefix_expansion_candidates`)에는 그 예산의 앞 `COLLECTION_TIME_FRACTION`(40%)만 주는 더 짧은 마감을 따로 계산해 넘기고, 판정(`analyse_words`·`fast_continuation_counts`)에는 전체 마감을 그대로 넘긴다 — 안 그러면 후보 많은 흔한 글자가 수집에서만 예산을 다 써 판정을 한 번도 못 해본다(2026-09-16 실 서비스 확인). `collect_matching_words`의 묶음 조회 루프도 시작 전뿐 아니라 진행 중에도 마감을 확인하도록 고쳤다(이전엔 시작 전 확인만 있어, 묶음이 많은데 동시 조회 수가 적으면 마감을 한참 넘겨서까지 기다렸다). 시간이 부족했으면(`REQUEST_TIME_BUDGET_WARNING`) 한방단어 목록을 캐시하지 않아 다음 검색이 데워진 캐시로 더 찾는다. `analyse_words`는 끝 글자 조회를 집합이 아니라 candidates 순서(정렬돼 있으면 희귀 받침 후보 먼저)를 보존한 목록으로 넣어, 시간이 부족해도 가능성 큰 후보부터 확인한다.
+- 목록은 두 단계로 나눠 보낸다(1단계 목록/후보, 2단계 `/api/continuations`). `words`/`all` 모드에만 해당한다. 개수가 정렬에 필요한 경로(`next`·`one-shot` 정렬)는 한 번에 계산한다.
+- 한방단어 모드(2026-09-16 재설계)는 매 호출이 짧게 끝나도록 설계됐다: `gather_one_shot_page()`가 끝 글자를 `ONE_SHOT_PAGE_SYLLABLE_BATCH`(=`LOOKUP_WORKERS`)개만 새로 확인하고, 후보가 모자라면 `scan_dictionary_batch()`로 `ONE_SHOT_FORWARD_SCAN_PAGES`(5묶음=500개)만 더 훑는다. 자체 시간 제한 `ONE_SHOT_PAGE_TIME_BUDGET`(10초)을 쓴다. 진행 상황(모은 후보·확인한 끝 글자·확정된 한방단어)을 캐시에 저장해 두어, '다음 결과 보기'를 여러 번 눌러도 처음부터 다시 훑지 않는다(예전엔 시간이 부족하면 다시 검색할 때마다 처음부터 다시 훑어 7번·약 1분 만에야 목표 단어를 찾은 적이 있었다, 2026-09-16 실사용 확인).
+- `/api/search`(`sort=next`·`sort=one-shot`)와 `/api/continuations`는 요청마다 `REQUEST_TIME_BUDGET`(15초) 하나를 공유하는 마감 시각을 계산해 넘긴다. 수집(`rare_final_candidates`·`prefix_expansion_candidates`)에는 그 예산의 앞 `COLLECTION_TIME_FRACTION`(40%)만 주는 더 짧은 마감을 따로 계산해 넘기고, 판정(`analyse_words`·`fast_continuation_counts`)에는 전체 마감을 그대로 넘긴다 — 안 그러면 후보 많은 흔한 글자가 수집에서만 예산을 다 써 판정을 한 번도 못 해본다(2026-09-16 실 서비스 확인). 넓게 훑는 함수들의 병렬 조회 루프는 시작 전뿐 아니라 진행 중에도 마감을 확인한다(`wait(timeout=remaining)`, `shutdown(wait=False, cancel_futures=True)`) — 시작 전 확인만 있으면 동시 조회 수가 적을 때 마감을 한참 넘겨서까지 기다린다. `analyse_words`는 끝 글자 조회를 집합이 아니라 candidates 순서(정렬돼 있으면 희귀 받침 후보 먼저)를 보존한 목록으로 넣어, 시간이 부족해도 가능성 큰 후보부터 확인한다.
 - 제한 시간과 재시도를 없애지 않는다. 현재 연결 10초, 응답 20초, 총 2회 시도(빠른 경로는 연결 2초·응답 3초·1회)다.
 - 성능 변경 후 흔한 글자 `기`와 드문 글자 `슘` 양쪽의 응답 시간과 판정을 확인한다.
 
@@ -183,7 +183,7 @@ curl -sS http://127.0.0.1:5000/api/health
 - 국립국어원 API 응답 속도와 일일 호출 제한에 영향을 받는다.
 - API 분류 필드 차이로 일부 필터가 사전 웹사이트와 완전히 같지 않을 수 있다.
 - 두음 변형의 이어갈 단어 수에는 중복이 포함될 수 있다.
-- 한방단어 후보 수집은 사전 한 곳당 최대 `ONE_SHOT_SCAN_CAP`(3000)개까지만 본다. 시작 단어가 아주 많은 흔한 글자는 그 이후에 나오는 극히 희귀한 한방단어를 여전히 놓칠 수 있다.
+- 한방단어 모드는 '조금씩 이어서' 찾으므로, 시작 단어가 아주 많은 흔한 글자는 '다음 결과 보기'를 여러 번 눌러야 드문 한방단어가 나올 수 있다. 한 번 호출은 짧지만, 다 찾으려면 여러 번 눌러야 할 수 있다.
 - 우리말샘은 옛말의 옛한글을 사용자 지정 영역(PUA, 예: U+E451) 코드로 준다. 표준 글꼴엔 그림이 없어 네모로 보이며, 화면은 표기를 그대로 두고 안내 문구만 붙인다.
 - 한방 판정은 선택한 사전과 필터 기준이며 실제 게임별 허용 규칙과 다를 수 있다.
 

@@ -39,20 +39,11 @@ RARE_PROBE_DEEP_START = 10
 RARE_PROBE_SHALLOW_START = 2
 RARE_CANDIDATE_LIMIT = 120
 ONE_SHOT_ANALYSIS_LIMIT = 80
-# 한방단어 판정용 후보를 사전 한 곳에서 실제로 끝까지 살펴보는 상한. 사용자와 상의해
-# 정확도와 속도의 균형점으로 정했다(2026-09-15). 이 개수 이후에 나오는 아주 희귀한
-# 단어는 여전히 놓칠 수 있다.
-ONE_SHOT_SCAN_CAP = 3000
-ONE_SHOT_SCAN_MAX_BATCHES = -(-ONE_SHOT_SCAN_CAP // API_PAGE_SIZE)
-# 검색 요청 하나에 쓸 수 있는 최대 시간(한방단어 모드, 이어갈 단어 적은
-# 순·한방단어 우선 정렬, /api/continuations 모두 공통). 실 서비스(Render)
-# 앞단이 응답을 약 30~32초에서 끊는 걸 직접 재현해 확인했다(2026-09-15).
-# 8초까지 줄였더니 국립국어원 API가 느린 날엔 흔한 글자(예: '리')가 시간
-# 부족으로 한방단어를 거의 못 찾는 문제가 생겨(2026-09-15, 실 서비스에서
-# 확인: '리' 2회 검색해 1개만 확인), 사용자와 상의해 15초로 다시 늘렸다.
-# 그래도 실 서비스 한도(약 30초)의 절반 수준이라 여유가 있다. 넘기면
-# 그때까지 확인한 결과만 돌려주고, 나머지는 다음 검색(캐시가 데워져
-# 더 빨라짐)에 맡긴다.
+# 검색 요청 하나에 쓸 수 있는 최대 시간(이어갈 단어 적은 순·한방단어 우선
+# 정렬, /api/continuations 공통. 한방단어 모드 자체는 아래 ONE_SHOT_PAGE_*를
+# 따로 쓴다). 실 서비스(Render) 앞단이 응답을 약 30~32초에서 끊는 걸 직접
+# 재현해 확인했다(2026-09-15). 넘기면 그때까지 확인한 결과만 돌려주고,
+# 나머지는 다음 검색(캐시가 데워져 더 빨라짐)에 맡긴다.
 REQUEST_TIME_BUDGET = 15.0
 REQUEST_TIME_BUDGET_WARNING = "시간이 부족해 일부 후보를 확인하지 못했습니다. 같은 글자로 다시 검색하면 이어서 더 찾아냅니다."
 # 후보를 '모으는' 단계(collect_matching_words 등)에 예산을 다 뺏기면, 정작
@@ -78,6 +69,17 @@ REQUEST_ATTEMPTS = 2
 # 많은 동시 요청을 감당하지 못해, 늘리는 게 오히려 낱개 요청을 훨씬 느리게
 # 만드는 역효과였다. 줄여서 낱개 요청이 원래 속도(몇 초)를 유지하게 한다.
 LOOKUP_WORKERS = 6
+# 한방단어 모드는 '한 번에 다 찾기'가 아니라 '조금씩 이어서 찾기'로 동작한다
+# (2026-09-16, 사용자 요청 — 한 번에 다 찾으려다 시간이 부족하면 다시 검색을
+# 여러 번 해도 매번 처음부터 다시 훑어 오래 걸렸다: 실사용 확인, 다시 검색
+# 7번·약 1분 만에야 목표 단어를 찾음). 호출 한 번은 끝 글자를
+# ONE_SHOT_PAGE_SYLLABLE_BATCH(=LOOKUP_WORKERS)개만 새로 확인해 한 라운드
+# 안에 끝나게 하고, 후보가 모자라면 사전 원본을 ONE_SHOT_FORWARD_SCAN_PAGES
+# 묶음만 더 훑는다. 화면의 '다음 결과 보기'를 누를 때마다 이어서 더 찾는다.
+ONE_SHOT_PAGE_TIME_BUDGET = 10.0
+ONE_SHOT_PAGE_SYLLABLE_BATCH = LOOKUP_WORKERS
+ONE_SHOT_FORWARD_SCAN_PAGES = 5
+ONE_SHOT_FORWARD_SCAN_MAX_PAGES = 30
 RARE_FINALS = {
     "튬", "듐", "륨", "슘", "븀", "늄", "뮴", "윰", "쥼", "줌",
     "릇", "릎", "릉", "쁨", "쯤", "낌", "깡", "꽝", "쩡", "슛",
@@ -847,147 +849,143 @@ def paged_search_with_dueum(dictionaries: list[str], query: str, filters: Filter
     return list(merged.values()), total, list(dict.fromkeys(warnings))
 
 
-def collect_matching_words(
-    dictionaries: list[str], query: str, filters: Filters, cap: int = ONE_SHOT_SCAN_CAP,
+def scan_dictionary_batch(
+    dictionary: str, query: str, filters: Filters, start_api_page: int, page_count: int,
     deadline: float | None = None,
-) -> tuple[list[dict], int, list[str]]:
-    """검색어로 시작하는 단어를 사전마다 최대 cap개까지 실제로 모두 가져온다.
+) -> tuple[list[dict], int, bool, list[str]]:
+    """사전 원본 목록을 `start_api_page`부터 `page_count`묶음만 병렬로 가져온다.
 
-    한방단어 판정은 후보 단어들의 '진짜 마지막 글자'를 빠짐없이 알아야 정확하다.
-    예전에는 손으로 정해둔 '희귀 받침 목록'(RARE_FINALS, 20개)에 없는 받침으로
-    끝나는 단어는 통째로 후보에서 빠졌다(예: 차풰→풰, 치미는아픔→픔). 이 함수는
-    추측 목록 없이 실제 단어 목록을 넓게 확보해 그 문제를 없앤다. 첫 묶음으로
-    전체 개수를 알아낸 뒤 남은 묶음은 병렬로 가져와 느려지지 않게 한다.
-
-    묶음 조회는 다른 넓은 후보 탐색(`rare_final_candidates` 등)과 같이 짧은
-    제한 시간(`FAST_REQUEST_TIMEOUT`)·1회 시도만 쓴다. 후보가 많은 흔한 글자는
-    수십 묶음을 병렬로 불러야 하는데, 기본 제한 시간(연결 10초·응답 20초·2회
-    재시도)을 쓰면 한 묶음만 느려져도 전체가 운영 서버 제한 시간을 넘겨 502가
-    난다(2026-09-15, 실 서비스에서 확인). 느린 묶음 하나를 놓치는 것이 전체
-    검색 실패보다 낫다.
+    한방단어 페이지 스캔에 쓴다(2026-09-16, 사용자 요청). 한 번에 다 모으지
+    않고 조금씩(기본 5묶음=500개) 이어서 훑어, '다음 결과 보기' 한 번이
+    항상 빠르게 끝나게 한다. (단어 목록, 이 사전의 전체 개수, 더 훑을 페이지가
+    남았는지, 경고)를 돌려준다.
     """
-    merged: dict[str, dict] = {}
-    raw_total = 0
-    warnings: list[str] = []
-    for dictionary in dictionaries:
+    api_starts = list(range(start_api_page, start_api_page + page_count))
+
+    def probe(api_start: int) -> tuple[list[dict], int, list[str]]:
         try:
-            first_batch, total = fetch_dictionary(
-                dictionary, query, 1, API_PAGE_SIZE, filters,
+            words, total = fetch_dictionary(
+                dictionary, query, api_start, API_PAGE_SIZE, filters,
                 request_timeout=FAST_REQUEST_TIMEOUT, attempts=1,
             )
+            return words, total, []
         except ApiError as exc:
-            warnings.append(str(exc))
-            continue
-        raw_total += total
-        for word in first_batch:
-            merge_word(merged, word)
-        scan_target = min(total, cap)
-        max_batch = min(-(-scan_target // API_PAGE_SIZE), ONE_SHOT_SCAN_MAX_BATCHES)
-        starts = list(range(2, max_batch + 1))
-        if not starts:
-            continue
-        if deadline is not None and time.monotonic() >= deadline:
-            warnings.append(REQUEST_TIME_BUDGET_WARNING)
-            continue
+            return ([], 0, []) if "Invalid start value" in str(exc) else ([], 0, [str(exc)])
 
-        def probe(start: int) -> tuple[list[dict], list[str]]:
-            try:
-                words, _total = fetch_dictionary(
-                    dictionary, query, start, API_PAGE_SIZE, filters,
-                    request_timeout=FAST_REQUEST_TIMEOUT, attempts=1,
-                )
-                return words, []
-            except ApiError as exc:
-                return ([], []) if "Invalid start value" in str(exc) else ([], [str(exc)])
-
-        remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
-        executor = ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(starts)))
-        futures = {executor.submit(probe, start): start for start in starts}
-        done, not_done = wait(futures, timeout=remaining)
-        for future in done:
-            words, notes = future.result()
-            warnings.extend(notes)
-            for word in words:
-                merge_word(merged, word)
-        if not_done:
-            warnings.append(REQUEST_TIME_BUDGET_WARNING)
-        executor.shutdown(wait=False, cancel_futures=True)
-    return list(merged.values()), raw_total, list(dict.fromkeys(warnings))
-
-
-def gather_one_shot_candidates(
-    dictionaries: list[str], query: str, filters: Filters, dueum: bool, deadline: float | None = None,
-) -> tuple[list[dict], int, list[str]]:
-    """한방단어 후보 전체를 모은다(판정 전). 두 방법을 함께 쓴다.
-
-    ① `rare_final_candidates`/`prefix_expansion_candidates`: 희귀 받침으로
-    끝나는 단어를 역검색으로 targeted하게 찾는다. 적중률이 높고 빠르다
-    (2026-09-16, 실 서비스 진단: `sort=next` 정렬이 이 방법만으로 시간 안에
-    실제 한방단어를 여러 개 찾아냈다). 시간이 부족해 나머지를 못 해도
-    이 결과만으로 웬만큼 찾아낸다.
-    ② `collect_matching_words`: 검색어로 시작하는 단어를 실제로 넓게(순서
-    그대로) 가져온다. 손으로 정해둔 '희귀 받침 목록'에 없는 단어(예: 차풰)도
-    잡아내지만, ①보다 느리므로 남는 시간만큼만 보탠다.
-    """
-    merged: dict[str, dict] = {}
+    remaining = None if deadline is None else max(0.0, deadline - time.monotonic())
+    executor = ThreadPoolExecutor(max_workers=min(LOOKUP_WORKERS, len(api_starts)))
+    futures = {executor.submit(probe, api_start): api_start for api_start in api_starts}
+    done, not_done = wait(futures, timeout=remaining)
+    collected: list[dict] = []
+    total = 0
     warnings: list[str] = []
-
-    rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters, deep=False, deadline=deadline)
-    warnings.extend(rare_warnings)
-    for word in rare_candidates:
-        merge_word(merged, word)
-    expanded_candidates, expanded_warnings = prefix_expansion_candidates(
-        dictionaries, query, list(merged.values()), filters, deadline=deadline,
-    )
-    warnings.extend(expanded_warnings)
-    for word in expanded_candidates:
-        merge_word(merged, word)
-
-    queries = get_dueum_variants(query) if dueum and len(query) == 1 else [query]
-    starting_total = 0
-    for search_query in queries:
-        words, total, notes = collect_matching_words(dictionaries, search_query, filters, deadline=deadline)
-        starting_total += total
+    for future in done:
+        words, batch_total, notes = future.result()
+        collected.extend(words)
+        total = max(total, batch_total)
         warnings.extend(notes)
-        for word in words:
-            merge_word(merged, word)
-    return sorted(merged.values(), key=candidate_priority), starting_total, list(dict.fromkeys(warnings))
+    if not_done:
+        warnings.append(REQUEST_TIME_BUDGET_WARNING)
+    executor.shutdown(wait=False, cancel_futures=True)
+    last_scanned_page = start_api_page + page_count - 1
+    has_more_pages = last_scanned_page * API_PAGE_SIZE < total and last_scanned_page < ONE_SHOT_FORWARD_SCAN_MAX_PAGES
+    return collected, total, has_more_pages, list(dict.fromkeys(warnings))
 
 
-def gather_one_shot_words(dictionaries: list[str], query: str, filters: Filters, dueum: bool) -> tuple[list[dict], int, list[str]]:
-    """한방단어 모드의 '확정된 한방단어 전체 목록'을 한 번에 모은다.
+def gather_one_shot_page(
+    dictionaries: list[str], query: str, filters: Filters, dueum: bool,
+) -> tuple[list[dict], list[dict], bool, int, list[str]]:
+    """한방단어 모드를 '조금씩 이어서' 확인한다(사용자 요청, 2026-09-16).
 
-    넓게 모은 후보 + 한방 판정을 모두 거친 결과를 (한방단어 목록, 시작 단어
-    총계, 경고)로 돌려준다. 페이지와 무관한 값이므로 (검색어, 사전들, 필터,
-    두음)으로 캐시하고, 라우트는 이 목록을 페이지 크기로 잘라서 보여 준다.
+    한 번에 다 모아서 판정하면(예전 방식) 시간이 부족할 때 사용자가 몇 번을
+    다시 검색해도 매번 처음부터 다시 훑어 오래 걸렸다(실사용 확인: 다시
+    검색 7번·약 1분 만에야 '치미는아픔'을 찾음). 대신 같은 검색(검색어·
+    사전·필터·두음)의 진행 상황을 캐시에 저장해 두고, 호출될 때마다 아직
+    안 본 끝 글자를 조금(`ONE_SHOT_PAGE_SYLLABLE_BATCH`개)만 더 확인해 새로
+    확정된 한방단어만 돌려준다. 그래서 한 번 호출은 대개 한 라운드(몇 초)
+    안에 끝나고, 화면의 '다음 결과 보기'를 여러 번 누르면 이어서 더 찾는다.
 
-    전체 과정은 `REQUEST_TIME_BUDGET`(15초) 안에서만 진행한다. 후보 수집에는
-    그중 앞 `COLLECTION_TIME_FRACTION`(40%)만 주고, 나머지는 항상 판정에
-    남긴다 — 안 그러면 후보가 아주 많은 흔한 글자가 수집 단계에서만 예산을
-    다 써 버려 판정을 한 번도 못 해보고 0개로 끝난다(2026-09-16, 실 서비스에서
-    확인). 시간이 부족해 일부만 확인했으면 그 결과는 캐시하지 않는다 —
-    다음 검색이 그새 데워진 캐시(사전 API 응답 캐시는 검색어와 무관하게
-    공유됨)를 타고 더 많이 확인할 수 있도록 남겨 둔다.
+    후보는 두 곳에서 모은다: ① `rare_final_candidates`/`prefix_expansion_candidates`
+    (희귀 받침 역검색, 적중률 높음, 처음 한 번만) ② `scan_dictionary_batch`로
+    사전 원본을 조금씩 이어서 훑기(목록 밖 받침도 잡아냄).
+
+    (이번 페이지에서 새로 확정된 한방단어, 지금까지 확정된 한방단어 전체,
+    더 볼 게 남았는지, 시작 단어 총계, 경고)를 돌려준다.
     """
-    cache_key = ("one_shot_full", query, tuple(dictionaries), filters.key(), dueum)
-    cached = cache.get(cache_key)
-    if cached is not None:
-        return copy.deepcopy(cached)
+    dictionary = dictionaries[0]
+    progress_key = ("one_shot_progress", query, dictionary, filters.key(), dueum)
+    progress = cache.get(progress_key)
+    if progress is None:
+        progress = {
+            "candidates": {},
+            "syllables": [],
+            "checked": {},
+            "confirmed": {},
+            "next_api_page": 1,
+            "exhausted": False,
+            "starting_total": 0,
+            "warnings": [],
+            "rare_pass_done": False,
+        }
 
-    request_start = time.monotonic()
-    deadline = request_start + REQUEST_TIME_BUDGET
-    collection_deadline = request_start + REQUEST_TIME_BUDGET * COLLECTION_TIME_FRACTION
-    candidates, starting_total, warnings = gather_one_shot_candidates(dictionaries, query, filters, dueum, deadline=collection_deadline)
-    analysed, notes = analyse_words(
-        dictionaries, candidates, filters, dueum, exact_counts=False, fast_all_counts=True, deadline=deadline,
-    )
-    warnings.extend(notes)
-    one_shots = [word for word in analysed if word["is_one_shot"]]
-    warnings = list(dict.fromkeys(warnings))
-    result = (one_shots, starting_total, warnings)
-    if REQUEST_TIME_BUDGET_WARNING not in warnings:
-        cache.set(cache_key, result)
-    return copy.deepcopy(result)
+    deadline = time.monotonic() + ONE_SHOT_PAGE_TIME_BUDGET
+
+    if not progress["rare_pass_done"]:
+        rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters, deep=False, deadline=deadline)
+        progress["warnings"].extend(rare_warnings)
+        for word in rare_candidates:
+            progress["candidates"].setdefault(word["word"], word)
+        expanded_candidates, expanded_warnings = prefix_expansion_candidates(
+            dictionaries, query, list(progress["candidates"].values()), filters, deadline=deadline,
+        )
+        progress["warnings"].extend(expanded_warnings)
+        for word in expanded_candidates:
+            progress["candidates"].setdefault(word["word"], word)
+        progress["rare_pass_done"] = True
+
+    unchecked = [s for s in progress["syllables"] if s not in progress["checked"]]
+    if len(unchecked) < ONE_SHOT_PAGE_SYLLABLE_BATCH and not progress["exhausted"]:
+        new_words, total, has_more_pages, scan_warnings = scan_dictionary_batch(
+            dictionary, query, filters, progress["next_api_page"], ONE_SHOT_FORWARD_SCAN_PAGES, deadline,
+        )
+        progress["warnings"].extend(scan_warnings)
+        progress["starting_total"] = max(progress["starting_total"], total)
+        for word in new_words:
+            progress["candidates"].setdefault(word["word"], word)
+        progress["next_api_page"] += ONE_SHOT_FORWARD_SCAN_PAGES
+        if not has_more_pages:
+            progress["exhausted"] = True
+        ordered = sorted(progress["candidates"].values(), key=candidate_priority)
+        progress["syllables"] = list(dict.fromkeys(last_hangul_syllable(w["word"]) for w in ordered))
+        unchecked = [s for s in progress["syllables"] if s not in progress["checked"]]
+
+    to_check = unchecked[:ONE_SHOT_PAGE_SYLLABLE_BATCH]
+    if to_check:
+        counts, count_warnings = fast_continuation_counts(dictionaries, to_check, filters, dueum, deadline=deadline)
+        progress["checked"].update(counts)
+        progress["warnings"].extend(count_warnings)
+
+    new_this_round = []
+    for word in progress["candidates"].values():
+        text = word["word"]
+        if text in progress["confirmed"]:
+            continue
+        last = last_hangul_syllable(text)
+        if last not in progress["checked"]:
+            continue
+        count, notes = progress["checked"][last]
+        if count == 0 and not notes:
+            word.update(
+                last_syllable=last, next_word_count=0, is_one_shot=True,
+                dictionary="두 사전 공통" if len(word["dictionary_codes"]) == 2 else DICTIONARIES[word["dictionary_codes"][0]]["name"],
+            )
+            progress["confirmed"][text] = word
+            new_this_round.append(word)
+
+    has_more = not progress["exhausted"] or any(s not in progress["checked"] for s in progress["syllables"])
+    warnings = list(dict.fromkeys(progress["warnings"]))
+    cache.set(progress_key, progress)
+    return new_this_round, list(progress["confirmed"].values()), has_more, progress["starting_total"], warnings
 
 
 @app.get("/")
@@ -1084,9 +1082,10 @@ def search():
         # 화면이 목록을 먼저 그린 뒤 '이어갈 단어 수'를 뒤 단계(/api/continuations)에서
         # 채우고 싶을 때 defer_counts=1 을 보낸다. `이어갈 단어 적은 순`·`한방단어 우선`
         # 정렬은 개수가 정렬에 필요하므로 예전처럼 한 번에 계산한다.
-        # 한방단어 모드는 후보 수집 자체가 실제 단어를 넓게 모으는 방식이라
-        # '희귀 끝글자만 먼저' 같은 절반짜리 1단계가 의미 없다. 항상 완전한
-        # 목록(캐시됨)을 모아 페이지 크기로 잘라서 보여 준다.
+        # 한방단어 모드는 '조금씩 이어서' 찾는다(사용자 요청, 2026-09-16).
+        # 매 요청이 짧게 끝나도록 gather_one_shot_page()가 자체 시간 제한
+        # (ONE_SHOT_PAGE_TIME_BUDGET)을 쓴다. '다음 결과 보기'를 누를 때마다
+        # 새로 확정된 한방단어만 더 받아 화면에 이어 붙인다.
         defer_counts = as_bool("defer_counts", False) and mode != "one-shot" and sort not in {"one-shot", "next"}
         deferred = False
         # 요청 하나에 걸리는 시간이 REQUEST_TIME_BUDGET을 넘지 않도록, 이
@@ -1099,11 +1098,11 @@ def search():
         deadline = request_start + REQUEST_TIME_BUDGET
         collection_deadline = request_start + REQUEST_TIME_BUDGET * COLLECTION_TIME_FRACTION
         if mode == "one-shot":
-            full_list, raw_total, warnings = gather_one_shot_words(dictionaries, query, filters, dueum)
-            analysed = full_list
-            start_index, end_index = (page - 1) * PAGE_SIZE, page * PAGE_SIZE
-            visible = order_words(full_list, sort)[start_index:end_index]
-            has_more = end_index < len(full_list)
+            new_words, confirmed_words, has_more, raw_total, warnings = gather_one_shot_page(
+                dictionaries, query, filters, dueum,
+            )
+            analysed = confirmed_words
+            visible = order_words(confirmed_words if page == 1 else new_words, sort)
         elif broad_sort:
             candidates, raw_total, warnings = paged_search_with_dueum(dictionaries, query, filters, page, dueum)
             if sort == "one-shot" or (sort == "next" and page == 1):

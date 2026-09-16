@@ -3,22 +3,50 @@
 - 실행: `python3`는 이 PC에서 깨진 별칭. `py -3 -m venv .venv` 만든 뒤 항상 `.venv\Scripts\python`으로 실행(Flask/requests/dotenv는 전역에 없음).
 - 검사 3종: `.venv\Scripts\python -m unittest discover -s tests -v` / `... -m compileall -q app.py tests` / `node --check static/main.js`.
 - 테스트는 모듈 전역 `app.cache`를 공유하므로 캐시가 결과에 영향 주는 새 테스트는 `setUp`에서 `app.cache._items.clear()` 필요.
-- 한방단어 모드는 `gather_one_shot_words()`가 페이지 무관하게 전체 목록을 1회 수집·캐시하고 라우트가 슬라이스. 페이지 넘김을 다시 손대면 이 구조 유지.
 - 두음 한방 판정은 `continuation_count()`에서만 역방향(`dueum_reverse_variants`)까지 확인. 단어 목록 경로(`paged_search_with_dueum`)는 건드리지 않는다.
 - 우리말샘은 옛말의 옛한글을 사용자 지정 영역(PUA, 예: U+E451) 코드로 준다. 표준 글꼴에 그림이 없어 네모(□)로 보인다. 사용자 결정(2026-09-04): 표기는 그대로 두고 `main.js`의 `ARCHAIC_HANGUL` 정규식으로 찾아 카드에 안내 문구만 붙인다. 지우거나 변환하지 않는다.
-- 첫 검색이 느린 원인(측정): 단어 목록은 2~3초면 오지만 카드마다 '이어갈 단어 수'를 세느라 국립국어원에 수십 번 물어봄. 캐시가 차면 0.3초.
-- 두 단계 로딩(`defer_counts=1`, `next`·`one-shot` 정렬만 제외):
-  - `words`/`all`: `search()`가 `describe_words_without_counts()`로 목록만 먼저(`deferred=true`), 화면 `fillDeferredCounts()`가 `GET /api/continuations`로 숫자·한방 뱃지를 채움.
-  - `one-shot` 모드(2026-09-15부터): `defer_counts`를 무시하고 항상 `gather_one_shot_words()` 전체 캐시 경로. `gather_one_shot_first_phase()`는 삭제됨.
-- (2026-09-15, 사용자 신고로 발견) `RARE_FINALS`(희귀 받침 20개 추측 목록)로 한방단어 후보를 좁히던 예전 방식은 근본적으로 불완전했다: 그 목록에 없는 받침(퓌/풰, 픔 등)으로 끝나면 시작 총계가 24개보다 클 때 후보에서 통째로 빠졌다(차풰, 치미는아픔을 놓친 실제 사례). 고치면서 `collect_matching_words()`를 새로 만들어 검색어로 시작하는 단어를 사전 한 곳당 `ONE_SHOT_SCAN_CAP`(3000, 사용자와 상의해 정확도·속도 균형점으로 결정)까지 실제로 병렬 수집하고, 나오는 모든 마지막 글자를 `analyse_words(fast_all_counts=True)`가 그대로 판정하게 바꿨다. `rare_final_candidates`/`prefix_expansion_candidates`는 이제 `sort=next`·`sort=one-shot`(일반 검색 모드)와 `/api/warm` 예열에서만 쓴다. 앞으로 "받침을 미리 추측해 후보를 좁히는" 방식을 다시 도입하면 같은 종류의 누락이 재발한다.
-- (2026-09-15, 배포 직후 발견) 위 `collect_matching_words()`를 처음 만들 때 `fetch_dictionary()`의 기본 제한 시간(연결 10초·응답 20초·2회 재시도)을 그대로 썼다가, 실 서비스(Render)에서 `차`처럼 흔한 글자 검색이 32초 만에 502로 실패하는 걸 라이브 사이트에 직접 `curl`로 재현해 확인했다. 원인은 흔한 글자가 최대 26묶음(`ONE_SHOT_SCAN_CAP=3000`÷100)을 병렬로 불러야 하는데, 묶음 하나만 느려도 최대 40초(20초×2회)까지 기다려 운영 서버 제한 시간을 넘긴 것. `rare_final_candidates`/`prefix_expansion_candidates` 등 기존의 '넓게 훑는' 함수들은 이미 `FAST_REQUEST_TIMEOUT`(연결 2초·응답 3초)·1회 시도만 쓰고 있었는데 새 함수만 그 관례를 놓쳤다. 앞으로 후보를 '넓게 훑는' 새 함수를 만들 때는 항상 `FAST_REQUEST_TIMEOUT`·`attempts=1`을 쓸 것 — 기본(느린) 제한 시간은 오탐 방지가 중요한 소수 호출(예: `continuation_count`의 정확 경로)에만 쓴다. 검증은 로컬 목(mock) 테스트만으로는 이런 실제 지연을 못 잡으므로, 배포된 사이트에 직접 `curl`로 재현해 확인하는 절차가 필요했다.
-- (2026-09-15, 같은 신고 재현 중 발견) 위 제한 시간만 고쳐도 실 서비스에서 `차`가 여전히 31초 만에 500(Flask 기본 오류 페이지, 우리 JSON 오류 계약 아님)으로 실패했다 — NIKL(국립국어원) API 자체가 실제로 느리고(작은 후보군인 `가나`도 13초 걸림 + 지연 경고 발생), Render 무료 플랜 앞단이 응답을 약 30~32초에서 끊는 고정 한도가 있는 것으로 보인다. 흔한 글자는 고유 끝 글자 수가 수백 개까지 늘어나 순차 확인 시간이 이 한도를 계속 넘길 수 있어, 개별 호출 제한 시간만으로는 근본 해결이 안 됐다. `ONE_SHOT_TIME_BUDGET`(처음 20초, `gather_one_shot_words()` 진입 시 `time.monotonic()+예산`으로 마감 시각 계산)을 도입해 `collect_matching_words()`(추가 묶음 건너뜀)·`fast_continuation_counts()`(`concurrent.futures.wait(timeout=...)`로 아직 시작 못 한 조회를 포기, 이미 실행 중인 스레드는 배경에서 끝나되 결과는 버림)에 전파했다. 시간 부족으로 일부만 확인됐으면(경고 포함) `gather_one_shot_words()`가 그 결과를 캐시하지 않는다 — 같은 글자로 다시 검색하면 그새 데워진 `fetch_dictionary` 캐시(검색어와 무관, 사전+글자+필터 단위) 덕분에 더 많이 확인된다. 재배포 후 라이브 사이트에서 직접 확인: 20초 예산으로 2552개짜리 `차`(우리말샘)는 처음 두 번은 시간 부족으로 0개, 세 번째 재시도(캐시 데워진 뒤)에 신고받았던 `차풰`가 정확히 나왔다 — 캐시 재사용이 실제로 동작함을 확인.
-- (2026-09-15, 사용자가 추가 요청) "필터·기기 상관없이 10초 이내" 요구에 맞춰 `ONE_SHOT_TIME_BUDGET`을 `REQUEST_TIME_BUDGET`(처음 8초)로 일반화했다. 예전엔 한방단어 모드에만 있던 마감 시각을 `/api/search`의 모든 분기(broad_sort의 `sort=next`/`sort=one-shot`, 그 안의 `rare_final_candidates`·`prefix_expansion_candidates`·`analyse_words`, 일반 목록의 `analyse_words`)와 `/api/continuations`의 `fast_continuation_counts`까지 라우트 진입 시 계산한 공유 마감 시각 하나로 전파했다. `rare_final_candidates`/`prefix_expansion_candidates`의 내부 병렬 수집도 `as_completed` 전체 대기 방식에서 `wait(timeout=remaining)` 방식으로 바꿔, 남은 futures는 취소하고(`shutdown(wait=False, cancel_futures=True)`) 결과를 버리도록 했다. `이어갈 단어가 적은 순` 정렬(`sort=next`)이 느리다는 신고도 같은 메커니즘으로 함께 해결했다 — 별도 최적화가 필요했던 게 아니라 시간 예산이 아예 없었던 게 원인이었다.
-- (2026-09-15, 8초로 배포한 직후 사용자 재신고) 라이브에서 세 경로 모두 10초 안에는 들어왔지만(9.2/8.9/8.9초), 국립국어원 API가 느린 상태라 `리`(한방단어가 꽤 많은 글자)를 두 번 검색해도 한방단어가 1개(`리액터모듈`)만 나왔다. 사용자 반응: "차라리 시간이 오래 걸리는 게 낫다" — 속도보다 실제로 찾아내는 게 우선이라는 뜻. 두 가지로 대응: ① `REQUEST_TIME_BUDGET`을 15초로 다시 늘림(그래도 실 서비스 한도 약 30초의 절반). ② 더 중요한 개선: `analyse_words()`의 `fast_all_counts` 경로가 끝 글자를 **집합**(순서 없음)으로 모아 조회하던 것을 candidates 순서를 보존한 **목록**으로 바꿨다. `gather_one_shot_candidates()`가 이미 `candidate_priority`로 희귀 받침 후보를 앞에 정렬해 두는데, 그 순서가 집합 변환 과정에서 사라져 시간이 부족하면 아무 후보나 무작위로 확인되고 있었다. 이제는 시간이 모자라도 '한방단어일 가능성이 큰 후보'부터 확인한다. 교훈: 시간 예산을 조이는 것만으로는 부족하고, 그 예산을 어떤 순서로 쓰는지가 체감 품질에 더 크게 영향을 준다.
-- (2026-09-16, `/goal`로 재요청받아 진짜 원인을 진단) 15초로도 `리·가·온·사랑·훈` 다섯 글자 전부 정확히 15.6~15.9초씩 걸리고 대부분 시간 부족 경고가 떴다. 후보 수가 전혀 다른 글자들(16889개 vs 419개)이 왜 다 똑같은 시간이 걸리는지 이상해서, `/api/continuations`에 끝 글자 딱 하나만 물어보는 진단 요청을 라이브 사이트에 직접 보냈다: 단독 호출은 2.5~5초, 그런데 같은 순간 한방단어 검색(24개 동시 조회)은 여전히 15초를 다 썼다. 즉 원인은 국립국어원 서버가 아니라 **우리 쪽이 동시에 너무 많이 물어봐서(LOOKUP_WORKERS=24) 낱개 요청 자체가 느려지는 자기 유발 정체**였다. `LOOKUP_WORKERS`를 24→6으로 낮춰 배포했더니, 후보가 적은 글자(온·훈)는 그대로였지만 후보가 아주 많은 글자(`리`)는 오히려 20초 넘게 응답이 아예 없어졌다 — 두 번째 버그 발견: `collect_matching_words()`의 묶음 조회 루프가 마감 시각을 **시작 전에만** 확인하고 일단 시작하면 끝까지(`with ThreadPoolExecutor ... as_completed`) 기다렸다. 동시 조회 수를 줄이면 같은 묶음 수를 처리하는 라운드가 늘어 이 미확인 구간이 훨씬 길어진 것. 두 가지를 함께 고쳤다: ① `collect_matching_words`도 다른 함수들처럼 `wait(timeout=remaining)`로 진행 중에도 마감을 확인. ② 수집과 판정이 같은 마감을 공유하면 후보 많은 글자가 수집에서만 예산을 다 써 판정을 한 번도 못 해보는 문제가 있어, `COLLECTION_TIME_FRACTION`(40%)으로 수집엔 짧은 마감을, 판정엔 전체 마감을 따로 준다. 교훈: 병렬 처리량을 늘리는 게 항상 빠르게 만들지 않는다 — 실제로 라이브에 최소 진단 요청(끝 글자 하나)을 보내 '단독이면 빠른데 왜 묶어서 하면 느린가'를 직접 비교한 게 결정적이었다. 또한 마감 시각 안전장치는 매 실행 지점(시작 전 + 진행 중)에 다 넣어야지, 한 곳만 넣으면 다른 조건(동시성 감소 등)에서 다시 뚫린다.
-- (2026-09-16, 같은 재요청 처리 중 추가 발견) 위 두 수정을 배포한 뒤에도 `리·가·온`(한방단어 모드)은 여전히 0개였다. 그런데 같은 순간 `sort=next`(이어갈 단어 적은 순)로 `리`를 검색하면 4개를 정확히 찾아냈다(14.65초, 시간 부족 경고 없음). 두 경로의 차이를 보니: `sort=next`는 `rare_final_candidates`(희귀 받침으로 끝나는 단어를 **역검색**, 적중률이 높음)를 쓰는데, 한방단어 모드는 이걸 버리고 `collect_matching_words`(검색어로 시작하는 단어를 **순서대로 그냥 훑기**)만 썼다. 순서대로 훑으면 처음 수백~수천 개 안에 희귀 받침으로 끝나는 단어가 우연히 있어야만 걸리는데, 그럴 확률이 낮아 시간 예산 안에 후보를 하나도 못 만나는 경우가 많았다. 고침: `gather_one_shot_candidates()`가 이제 ① `rare_final_candidates`/`prefix_expansion_candidates`(빠르고 적중률 높음, 먼저)와 ② `collect_matching_words`(느리지만 목록 밖 받침도 잡음, 남는 시간만큼 보조)를 함께 쓴다. 교훈: "더 정확한 방법으로 통째로 갈아끼우기"보다 "빠른 기존 방법 위에 더 정확한 방법을 보조로 얹기"가 실제 인프라 제약 아래서는 더 안전하다 — 정확도 개선과 속도 개선을 분리해서 생각하지 말 것.
-- 끝 글자 병렬 조회는 `fast_continuation_counts()`로 통일(= `analyse_words` 빠른 경로 + `/api/continuations` 공유). `patient_retry`면 재시도를 `PATIENT_FAST_TIMEOUT(3,6)`로. `LOOKUP_WORKERS=6`(2026-09-16, 24에서 낮춤 — 위 항목 참고), `rare_final_candidates`/`prefix_expansion_candidates`도 같은 작업자 수. 연결은 공유 `_http = requests.Session()`.
-- (2026-09-16) `시간이 부족` 경고가 뜨면 화면에 "다시 검색" 버튼(`#retry-button`)이 함께 나온다. `showMessage(text, kind, retry)`의 세 번째 인자로 제어하며, 눌리면 `search()`를 그대로 다시 부른다(같은 폼 값으로 재검색, 데워진 캐시를 탐).
+- 두 단계 로딩(`defer_counts=1`, `next`·`one-shot` 정렬·`mode=one-shot` 모두 제외): `words`/`all`에서만 `search()`가 `describe_words_without_counts()`로 목록만 먼저(`deferred=true`), 화면 `fillDeferredCounts()`가 `GET /api/continuations`로 숫자·한방 뱃지를 채움.
+
+## 한방단어 모드: 현재 구조(2026-09-16 재설계, 사용자 요청)
+
+한방단어 모드는 **한 번에 다 찾지 않고 조금씩 이어서 찾는다**. `gather_one_shot_page()`가
+같은 검색(검색어·사전·필터·두음)의 진행 상황을 `cache`에 저장해 두고, 호출될 때마다
+끝 글자를 `ONE_SHOT_PAGE_SYLLABLE_BATCH`(=`LOOKUP_WORKERS`=6)개만 새로 확인해 새로
+확정된 한방단어만 돌려준다(자체 시간 제한 `ONE_SHOT_PAGE_TIME_BUDGET`=10초). 후보가
+모자라면 `scan_dictionary_batch()`로 사전 원본을 `ONE_SHOT_FORWARD_SCAN_PAGES`(5묶음
+=500개)만 더 훑는다. 처음 한 번만 `rare_final_candidates()`/`prefix_expansion_candidates()`
+(희귀 받침 역검색, 적중률 높고 빠름)로 후보를 보강한다. 라우트는 `page==1`이면 지금까지
+확정된 전체를, `page>1`("다음 결과 보기")이면 새로 확정된 것만 돌려준다. 페이지 넘김을
+다시 손대면 이 구조(진행 상황 캐시 + 소량씩 확인) 유지.
+
+**여기 도달하기까지의 핵심 교훈** (자세한 시행착오는 git log 참고, 여기서는 결론만):
+1. 손으로 정해둔 '희귀 받침 추측 목록'(`RARE_FINALS`, 20개)만으로 후보를 좁히면 그
+   목록에 없는 받침(예: 차풰→풰, 치미는아픔→픔)으로 끝나는 한방단어를 통째로 놓친다.
+   → 실제 사전 원본을 넓게 훑는 경로(`scan_dictionary_batch`)가 반드시 있어야 한다.
+2. 하지만 "넓게 순서대로 훑기"만 쓰면(추측 목록을 아예 안 쓰면) 희귀 받침 후보를
+   우연히 만날 확률이 낮아 적중률이 나쁘다. → `rare_final_candidates`(끝 글자로
+   역검색, 적중률 높음)를 **먼저** 쓰고, 넓게 훑기는 보조로 남는 시간에만 쓴다.
+3. 새로 만드는 '넓게 훑는' 함수는 항상 `FAST_REQUEST_TIMEOUT`·`attempts=1`을 쓸 것
+   (기본 제한 시간을 쓰면 실 서비스에서 502/500이 났다, 2026-09-15 확인).
+4. 시간 제한(`deadline`) 안전장치는 **시작 전 확인만으로는 부족**하다 — 일단 시작한
+   병렬 조회 안에서도 `concurrent.futures.wait(timeout=remaining)` +
+   `shutdown(wait=False, cancel_futures=True)`로 진행 중에 계속 확인해야 한다(시작
+   전 확인만 있으면 동시 조회 수가 적을 때 마감을 한참 넘겨서까지 기다린다).
+5. '후보 수집'과 '판정'이 같은 시간 예산을 공유하면, 후보 많은 흔한 글자가 수집에서만
+   예산을 다 써 판정을 한 번도 못 해본다 — 수집엔 짧은 몫만(`COLLECTION_TIME_FRACTION`
+   =40%), 판정엔 전체를 준다(broad_sort 경로의 `sort=next`/`sort=one-shot`, `REQUEST_TIME_BUDGET`
+   =15초에 여전히 적용 중).
+6. 동시 요청 수(`LOOKUP_WORKERS`)를 늘리는 게 항상 빠르게 만들지 않는다 — 실 서비스
+   진단(끝 글자 하나만 단독 호출: 2.5~5초, vs 24개 동시: 15초를 다 써도 몇 개 못 끝냄)
+   결과 24→6으로 낮췄다. 무료 플랜 CPU와 국립국어원 서버 둘 다 그렇게 많은 동시
+   요청을 감당하지 못해, 늘리는 게 자기 유발 정체로 낱개 요청을 오히려 느리게 했다.
+7. "한 번에 다 모아서 판정, 실패하면 통째로 재시도"는 사용자 체감상 나쁘다(다시 검색
+   7번·약 1분 만에야 목표 단어를 찾은 적 있음, 2026-09-16). 진행 상황을 캐시에
+   보존해 "조금씩 이어서" 하는 편이 매 호출을 짧게 유지하면서도 결국 다 찾아낸다.
+8. 이런 종류의 성능 버그는 로컬 목(mock) 테스트로 못 잡는다 — 배포된 사이트에
+   직접 `curl`/진단 요청을 보내 재현·비교하는 절차가 결정적이었다.
+
+- 끝 글자 병렬 조회는 `fast_continuation_counts()`로 통일(= `analyse_words` 빠른 경로 + `/api/continuations` 공유). `patient_retry`면 재시도를 `PATIENT_FAST_TIMEOUT(3,6)`로. `LOOKUP_WORKERS=6`, `rare_final_candidates`/`prefix_expansion_candidates`도 같은 작업자 수. 연결은 공유 `_http = requests.Session()`.
+- (2026-09-16) `시간이 부족` 경고가 뜨면 화면에 "다시 검색" 버튼(`#retry-button`)이 함께 나온다. `showMessage(text, kind, retry)`의 세 번째 인자로 제어하며, 눌리면 `search()`를 그대로 다시 부른다(같은 폼 값으로 재검색, 데워진 캐시를 탐). 한방단어 모드는 이제 "다음 결과 보기"가 기본 진행 수단이라 이 버튼은 주로 `sort=next`/`sort=one-shot`·`/api/continuations` 쪽 시간 부족에 쓰인다.
 - `/api/continuations` 는 한 요청에 끝 글자를 많이(20+) 넣고 NIKL이 크게 지연되면 gunicorn 60초 제한을 넘겨 502가 난다. 화면 `fillDeferredCounts()`가 8개씩 잘게 나눠 병렬 호출하고 실패분만 backoff(0·1.5·3·5초)로 재시도한다. 서버 `CONTINUATION_SYLLABLE_LIMIT=60`은 안전장치.
-- 첫 한방단어 검색 예열: `GET /api/warm` → 백그라운드로 `rare_final_candidates`의 '끝일치' fetch 캐시를 채움(검색어 무관). 화면이 페이지 로드 시 0·1.5·4초에 3회 호출(워커 2개라 프로세스별 캐시 대비). `_last_warm` 가드(CACHE_TTL/2).
-- 측정(2026-09-04 배포): "시작하는 단어" 첫 화면 ~2초(전 18초). "한방단어" 1단계 후보/확정 한방단어 ~1~3초(예열·캐시 후), 2단계는 NIKL 상태 따라 십수 초까지. NIKL 지연은 대체로 일시적.
+- 첫 검색 예열: `GET /api/warm` → 백그라운드로 `rare_final_candidates`의 '끝일치' fetch 캐시를 채움(검색어 무관, `sort=next`·`sort=one-shot` 정렬용). 화면이 페이지 로드 시 0·1.5·4초에 3회 호출(워커 2개라 프로세스별 캐시 대비). `_last_warm` 가드(CACHE_TTL/2).
