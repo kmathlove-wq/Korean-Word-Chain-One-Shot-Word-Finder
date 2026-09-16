@@ -918,14 +918,33 @@ def collect_matching_words(
 def gather_one_shot_candidates(
     dictionaries: list[str], query: str, filters: Filters, dueum: bool, deadline: float | None = None,
 ) -> tuple[list[dict], int, list[str]]:
-    """한방단어 후보 전체를 모은다(판정 전). 검색어(와 두음 변형)로 시작하는 단어를
-    실제로 넓게 가져와 후보로 삼는다. 어떤 받침으로 끝나든 analyse_words가 그대로
-    판정하므로, 손으로 정해둔 '희귀 받침 목록'에 없는 단어도 놓치지 않는다.
+    """한방단어 후보 전체를 모은다(판정 전). 두 방법을 함께 쓴다.
+
+    ① `rare_final_candidates`/`prefix_expansion_candidates`: 희귀 받침으로
+    끝나는 단어를 역검색으로 targeted하게 찾는다. 적중률이 높고 빠르다
+    (2026-09-16, 실 서비스 진단: `sort=next` 정렬이 이 방법만으로 시간 안에
+    실제 한방단어를 여러 개 찾아냈다). 시간이 부족해 나머지를 못 해도
+    이 결과만으로 웬만큼 찾아낸다.
+    ② `collect_matching_words`: 검색어로 시작하는 단어를 실제로 넓게(순서
+    그대로) 가져온다. 손으로 정해둔 '희귀 받침 목록'에 없는 단어(예: 차풰)도
+    잡아내지만, ①보다 느리므로 남는 시간만큼만 보탠다.
     """
-    queries = get_dueum_variants(query) if dueum and len(query) == 1 else [query]
     merged: dict[str, dict] = {}
-    starting_total = 0
     warnings: list[str] = []
+
+    rare_candidates, rare_warnings = rare_final_candidates(dictionaries, query, filters, deep=False, deadline=deadline)
+    warnings.extend(rare_warnings)
+    for word in rare_candidates:
+        merge_word(merged, word)
+    expanded_candidates, expanded_warnings = prefix_expansion_candidates(
+        dictionaries, query, list(merged.values()), filters, deadline=deadline,
+    )
+    warnings.extend(expanded_warnings)
+    for word in expanded_candidates:
+        merge_word(merged, word)
+
+    queries = get_dueum_variants(query) if dueum and len(query) == 1 else [query]
+    starting_total = 0
     for search_query in queries:
         words, total, notes = collect_matching_words(dictionaries, search_query, filters, deadline=deadline)
         starting_total += total

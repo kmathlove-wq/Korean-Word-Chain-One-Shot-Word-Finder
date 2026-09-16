@@ -145,6 +145,23 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual([word["word"] for word in response.json["words"]], ["무릎", "무수탄산나트륨"])
 
+    def test_one_shot_candidates_combine_targeted_rare_search_with_broad_collection(self):
+        # 회귀 테스트(2026-09-16): 실 서비스 진단 결과, collect_matching_words만
+        # 쓰면(넓게 순서대로 훑기) 시간 예산 안에 희귀 받침 후보를 거의 못
+        # 만난다. rare_final_candidates(역검색이라 적중률이 높음)를 먼저
+        # 합쳐야 시간이 부족해도 웬만큼 찾아낸다.
+        targeted = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
+        broad = app.normalize_item({"word": "리본", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "rare_final_candidates", return_value=([targeted], [])) as rare, \
+             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
+             patch.object(app, "collect_matching_words", return_value=([broad], 500, [])), \
+             patch.object(app, "continuation_count", return_value=(0, [])):
+            candidates, total, warnings = app.gather_one_shot_candidates(["stdict"], "리", app.Filters(), False)
+        self.assertEqual(warnings, [])
+        self.assertEqual(total, 500)
+        self.assertEqual(sorted(word["word"] for word in candidates), ["리본", "리튬"])
+        rare.assert_called_once()
+
     def test_next_sort_uses_fast_continuation_counts_for_all_syllables(self):
         many = app.normalize_item({"word": "장가", "sense": {"pos": "명사"}}, "stdict")
         few = app.normalize_item({"word": "장튬", "sense": {"pos": "명사"}}, "stdict")

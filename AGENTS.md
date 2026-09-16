@@ -84,8 +84,8 @@ OPENDICT_API_KEY=우리말샘_키
 - `fetch_dictionary()`: 인증, 재시도, 제한 시간, JSON/XML 파싱, 필터 적용.
 - `fast_continuation_counts()`: 여러 끝 글자를 `LOOKUP_WORKERS`개 작업자로 병렬 조회하고 실패분을 1회 재시도(`patient_retry`면 긴 제한 시간). `analyse_words()` 빠른 경로와 `/api/continuations`가 공유한다.
 - `describe_words_without_counts()`: 두 단계 로딩 1단계에서 카드에 필요한 값(마지막 글자·사전 이름)만 채우고 수치는 `None`.
-- `collect_matching_words()`: 한방단어 후보 수집의 핵심(2026-09-15 도입). 검색어로 시작하는 단어를 사전 한 곳에서 최대 `ONE_SHOT_SCAN_CAP`(3000)개까지 실제로 병렬 수집한다. 손으로 정해둔 '희귀 받침 목록'을 추측하지 않으므로 그 목록에 없는 받침으로 끝나는 한방단어(예: 차풰, 치미는아픔)도 놓치지 않는다. `gather_one_shot_candidates()`가 두음 변형까지 합쳐 이 함수를 부른다.
-- `rare_final_candidates()` / `prefix_expansion_candidates()`: 일반 검색 모드의 `sort=next`·`sort=one-shot`에서만 쓰는 희귀 끝글자 역검색·접두 확장(및 `/api/warm` 예열). 한방단어 모드(`mode=one-shot`)는 더 이상 이 둘을 쓰지 않는다. 작업자 수는 `LOOKUP_WORKERS`.
+- `collect_matching_words()`: 검색어로 시작하는 단어를 사전 한 곳에서 최대 `ONE_SHOT_SCAN_CAP`(3000)개까지 실제로 병렬 수집한다(2026-09-15 도입). 손으로 정해둔 '희귀 받침 목록'을 추측하지 않으므로 그 목록에 없는 받침으로 끝나는 한방단어(예: 차풰)도 놓치지 않지만, `rare_final_candidates`보다 느리다. `gather_one_shot_candidates()`는 두 방법을 함께 쓴다: `rare_final_candidates`/`prefix_expansion_candidates`(역검색, 적중률 높고 빠름)를 먼저 부르고, 두음 변형까지 합쳐 이 함수를 보조로 더한다(2026-09-16, 실 서비스 진단: 이 함수만 쓰면 시간 예산 안에 희귀 받침 후보를 거의 못 만남).
+- `rare_final_candidates()` / `prefix_expansion_candidates()`: 희귀 끝글자 역검색·접두 확장. 일반 검색 모드의 `sort=next`·`sort=one-shot`과 `/api/warm` 예열뿐 아니라 한방단어 모드(`gather_one_shot_candidates()`)도 2026-09-16부터 다시 쓴다(빠르고 적중률 높은 1차 후보원). 작업자 수는 `LOOKUP_WORKERS`.
 - `paged_search()`: 필터를 통과한 화면 페이지 수집.
 - `continuation_count()`: 후속 단어 존재 확인. 한 항목만 조회하도록 축소하면 한 글자 필터 때문에 거짓 한방 판정이 재발한다. `dueum`이면 원음+정방향+역방향(`dueum_reverse_variants`)을 검사하고, 1페이지가 전부 걸리고 `total`이 크면 `start=2`를 한 번 더 본다. 사전 간 수는 `max`로 합친다(근사치).
 - `gather_one_shot_words()`: 한방단어 모드 전체 목록 1회 수집 + 캐시. 라우트는 이 목록을 페이지로 자른다.
