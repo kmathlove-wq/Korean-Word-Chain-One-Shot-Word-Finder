@@ -45,6 +45,13 @@
    보존해 "조금씩 이어서" 하는 편이 매 호출을 짧게 유지하면서도 결국 다 찾아낸다.
 8. 이런 종류의 성능 버그는 로컬 목(mock) 테스트로 못 잡는다 — 배포된 사이트에
    직접 `curl`/진단 요청을 보내 재현·비교하는 절차가 결정적이었다.
+9. (2026-09-16 추가) 시작 단어 총계가 크면(`ONE_SHOT_FORWARD_SCAN_LARGE_THRESHOLD`
+   =5000 이상) `scan_dictionary_batch()` 한 번에 500개가 아니라 1000개
+   (`ONE_SHOT_FORWARD_SCAN_PAGES_LARGE`=10묶음)씩 훑도록 사용자가 요청해 추가함
+   — 총계를 아는 순간(첫 훑기 이후)부터 적용되며, 라이브에서 `가`·`리`처럼
+   총계 15000+인 글자로 실제 페이지당 시간이 너무 길어지면 이 값을 다시
+   낮출 것(사용자가 직접 지시: "시간이 너무 오래걸리면 분석하는 개수를 좀
+   낮춰서 다시 시도").
 
 - 끝 글자 병렬 조회는 `fast_continuation_counts()`로 통일(= `analyse_words` 빠른 경로 + `/api/continuations` 공유). `patient_retry`면 재시도를 `PATIENT_FAST_TIMEOUT(3,6)`로. `LOOKUP_WORKERS=6`, `rare_final_candidates`/`prefix_expansion_candidates`도 같은 작업자 수. 연결은 공유 `_http = requests.Session()`.
 - (2026-09-16) `시간이 부족` 경고가 뜨면 화면에 "다시 검색" 버튼(`#retry-button`)이 함께 나온다. `showMessage(text, kind, retry)`의 세 번째 인자로 제어하며, 눌리면 `search()`를 그대로 다시 부른다(같은 폼 값으로 재검색, 데워진 캐시를 탐). 한방단어 모드는 이제 "다음 결과 보기"가 기본 진행 수단이라 이 버튼은 주로 `sort=next`/`sort=one-shot`·`/api/continuations` 쪽 시간 부족에 쓰인다.

@@ -78,7 +78,12 @@ LOOKUP_WORKERS = 6
 # 묶음만 더 훑는다. 화면의 '다음 결과 보기'를 누를 때마다 이어서 더 찾는다.
 ONE_SHOT_PAGE_TIME_BUDGET = 10.0
 ONE_SHOT_PAGE_SYLLABLE_BATCH = LOOKUP_WORKERS
+# 시작 단어 총계가 크면 한 번에 더 많이 훑어야 '다음 결과 보기'를 덜 눌러도
+# 된다(사용자 요청, 2026-09-16). 5000개 이상이면 1000개씩(10묶음), 그 미만이면
+# 500개씩(5묶음) 훑는다. 총계는 첫 훑기 전까지는 모르므로 그전엔 작은 쪽을 쓴다.
 ONE_SHOT_FORWARD_SCAN_PAGES = 5
+ONE_SHOT_FORWARD_SCAN_PAGES_LARGE = 10
+ONE_SHOT_FORWARD_SCAN_LARGE_THRESHOLD = 5000
 ONE_SHOT_FORWARD_SCAN_MAX_PAGES = 30
 RARE_FINALS = {
     "튬", "듐", "륨", "슘", "븀", "늄", "뮴", "윰", "쥼", "줌",
@@ -945,14 +950,21 @@ def gather_one_shot_page(
 
     unchecked = [s for s in progress["syllables"] if s not in progress["checked"]]
     if len(unchecked) < ONE_SHOT_PAGE_SYLLABLE_BATCH and not progress["exhausted"]:
+        # 시작 단어 총계가 크면 한 번에 더 많이 훑는다(사용자 요청, 2026-09-16).
+        # 총계를 아직 모르면(첫 훑기) 작은 쪽을 쓴다.
+        scan_pages = (
+            ONE_SHOT_FORWARD_SCAN_PAGES_LARGE
+            if progress["starting_total"] >= ONE_SHOT_FORWARD_SCAN_LARGE_THRESHOLD
+            else ONE_SHOT_FORWARD_SCAN_PAGES
+        )
         new_words, total, has_more_pages, scan_warnings = scan_dictionary_batch(
-            dictionary, query, filters, progress["next_api_page"], ONE_SHOT_FORWARD_SCAN_PAGES, deadline,
+            dictionary, query, filters, progress["next_api_page"], scan_pages, deadline,
         )
         progress["warnings"].extend(scan_warnings)
         progress["starting_total"] = max(progress["starting_total"], total)
         for word in new_words:
             progress["candidates"].setdefault(word["word"], word)
-        progress["next_api_page"] += ONE_SHOT_FORWARD_SCAN_PAGES
+        progress["next_api_page"] += scan_pages
         if not has_more_pages:
             progress["exhausted"] = True
         ordered = sorted(progress["candidates"].values(), key=candidate_priority)

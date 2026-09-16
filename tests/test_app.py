@@ -510,6 +510,20 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(second_new, [])
         self.assertEqual([w["word"] for w in second_confirmed], ["리튬"])
 
+    def test_gather_one_shot_page_scans_more_pages_when_total_is_large(self):
+        # 사용자 요청(2026-09-16): 시작 단어 총계가 5000개 이상이면 한 번에
+        # 500개(5묶음)가 아니라 1000개(10묶음)씩 훑어 더 빨리 진행한다.
+        many = app.normalize_item({"word": "가나", "sense": {"pos": "명사"}}, "stdict")
+        with patch.object(app, "rare_final_candidates", return_value=([], [])), \
+             patch.object(app, "prefix_expansion_candidates", return_value=([], [])), \
+             patch.object(app, "scan_dictionary_batch", return_value=([many], 12000, True, [])) as scan, \
+             patch.object(app, "continuation_count", return_value=(5, [])):
+            app.gather_one_shot_page(["stdict"], "가", app.Filters(), False)  # 1번째: 총계 아직 모름
+            app.gather_one_shot_page(["stdict"], "가", app.Filters(), False)  # 2번째: 총계(12000) 반영
+        first_call_pages, second_call_pages = (call.args[4] for call in scan.call_args_list)
+        self.assertEqual(first_call_pages, app.ONE_SHOT_FORWARD_SCAN_PAGES)
+        self.assertEqual(second_call_pages, app.ONE_SHOT_FORWARD_SCAN_PAGES_LARGE)
+
     def test_gather_one_shot_page_has_more_false_once_everything_checked(self):
         lithium = app.normalize_item({"word": "리튬", "sense": {"pos": "명사"}}, "stdict")
         with patch.object(app, "rare_final_candidates", return_value=([lithium], [])), \
